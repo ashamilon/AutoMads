@@ -1,0 +1,47 @@
+================================================================================
+ONE SCREEN — Meta Messenger webhooks + this app (tenant slug: demo)
+================================================================================
+
+1) Terminal A — API on 4000
+   npm run dev
+
+2) Terminal B — tunnel MUST be port 4000 (not 3000)
+   ngrok http 4000
+
+3) If ngrok shows a NEW URL, change BOTH:
+   - This file’s Callback URL (same pattern below)
+   - In .env: PUBLIC_BASE_URL=https://YOUR-NGROK-HOST.ngrok-free.dev
+
+4) Seed DB tenant + verify token (run once, or after DB reset)
+   npm run seed:demo
+   → Saves tenant API key to LOCAL-TENANT-API-KEY.txt (gitignored). Use that key for client portal login.
+
+--------------------------------------------------------------------------------
+Meta Developer Console → Your App → Messenger → Messenger API Settings
+(or Webhooks product): subscribe Page(s), then paste EXACTLY:
+--------------------------------------------------------------------------------
+
+Callback URL (verify + receive webhooks):
+https://cesarean-karaoke-creme.ngrok-free.dev/webhooks/facebook/demo
+
+Verify token (must match DB tenant.facebookVerifyToken — set by seed:demo):
+FB_VERIFY_DEMO_8K2M9P
+
+Webhook fields (Messenger Platform list is huge — ignore Page profile rows):
+  REQUIRED: subscribe "messages" only for text-based bot.
+  OPTIONAL: "messaging_postbacks" if you add buttons / Get Started later.
+  Leave everything else Unsubscribed (feed, birthday, marketing_*, etc.).
+
+--------------------------------------------------------------------------------
+After Meta verifies:
+--------------------------------------------------------------------------------
+- Connect the Facebook Page you test with; copy Page ID + Page access token into
+  this tenant (admin API or Prisma) as facebookPageId + facebookPageAccessToken.
+
+- Health check through ngrok:
+  GET https://cesarean-karaoke-creme.ngrok-free.dev/health
+
+================================================================================
+Secrets stay only on your machine: .env (DB, ADMIN_API_KEY, Supabase keys).
+Do not commit .env or paste DB passwords into chat or public repos.
+================================================================================

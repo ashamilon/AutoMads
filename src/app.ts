@@ -1,0 +1,85 @@
+import express, { type Request } from "express";
+import path from "node:path";
+import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import pinoHttp from "pino-http";
+import { logger } from "./utils/logger.js";
+import { errorHandler } from "./middlewares/errorHandler.js";
+import { adminRoutes } from "./routes/adminRoutes.js";
+import { facebookRoutes } from "./routes/facebookRoutes.js";
+import { sslcommerzRoutes } from "./routes/sslcommerzRoutes.js";
+import { clientRoutes } from "./routes/clientRoutes.js";
+import { tenantPortalRoutes } from "./routes/tenantPortalRoutes.js";
+import { telegramRoutes } from "./routes/telegramRoutes.js";
+import { serveMessengerCatalogImage } from "./controllers/catalogMessengerImageController.js";
+
+export function createApp(): express.Application {
+  const app = express();
+
+  // Trust the first proxy (ngrok / production load balancer). Required so
+  // express-rate-limit reads X-Forwarded-For correctly and stops warning.
+  app.set("trust proxy", 1);
+
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+          "script-src": ["'self'"],
+          "img-src": ["'self'", "data:", "https:"],
+        },
+      },
+    }),
+  );
+  app.use(cors());
+  app.use(
+    express.json({
+      limit: "2mb",
+      verify: (req, _res, buf) => {
+        (req as Request).rawBody = buf;
+      },
+    }),
+  );
+  app.use(express.urlencoded({ extended: true, limit: "2mb" }));
+
+  app.use(
+    pinoHttp({
+      logger,
+      autoLogging: true,
+    }),
+  );
+
+  const limiter = rateLimit({
+    windowMs: 60_000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  app.use(limiter);
+
+  app.get("/health", (_req, res) => {
+    res.json({ ok: true, service: "facebook-order-automation-saas" });
+  });
+
+  /** Relay catalog images so Meta can attach them when Supabase/other CDNs reject Facebook fetchers */
+  app.get("/public/messenger-catalog-image", serveMessengerCatalogImage);
+
+  app.use(express.static(path.join(process.cwd(), "public")));
+  app.get("/", (_req, res) => {
+    res.redirect("/admin/index.html");
+  });
+  app.get("/admin", (_req, res) => {
+    res.redirect("/admin/index.html");
+  });
+
+  app.use("/admin", adminRoutes);
+  app.use("/webhooks/facebook", facebookRoutes);
+  app.use("/webhooks/sslcommerz", sslcommerzRoutes);
+  app.use("/webhooks/telegram", telegramRoutes);
+  app.use("/webhooks/client", clientRoutes);
+  app.use("/api/v1", tenantPortalRoutes);
+
+  app.use(errorHandler);
+  return app;
+}

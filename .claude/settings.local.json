@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(netstat -ano)",
+      "Bash(findstr LISTENING)",
+      "Bash(taskkill *)",
+      "Bash(findstr :4000)",
+      "Bash(ollama show *)",
+      "Bash(ollama pull *)",
+      "Bash(npx prisma *)",
+      "Bash(node *)",
+      "PowerShell(Stop-Process *)",
+      "PowerShell(Get-NetTCPConnection *)"
+    ]
+  }
+}

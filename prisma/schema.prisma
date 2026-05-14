@@ -1,0 +1,197 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum IntegrationType {
+  API
+  DATABASE
+  WEBHOOK
+}
+
+enum OrderStatus {
+  DRAFT
+  PENDING_CLIENT_SYNC
+  AWAITING_PAYMENT
+  PAID
+  DELIVERY_SCHEDULED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  INITIATED
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum DeliveryStatus {
+  NONE
+  PENDING
+  BOOKED
+  IN_TRANSIT
+  DELIVERED
+  FAILED
+}
+
+/// Tenant = one business on the SaaS platform
+model Tenant {
+  id                      String   @id @default(cuid())
+  name                    String
+  slug                    String   @unique
+  isActive                Boolean  @default(true)
+  /// Graph API page token for sending/receiving Messenger
+  facebookPageAccessToken String?
+  facebookPageId          String?
+  /// Random string you set in Meta webhook subscription
+  facebookVerifyToken     String?
+  /// SHA-256 hex of full tenant API key (Bearer sk_live_...); set on create / regenerate
+  apiKeyHash              String?  @unique
+  /// e.g. { "defaultOrderAmountBdt": 500, "sslcommerz": { "storeId": "..." }, "pathao": { ... } }
+  settings                Json?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  integration       TenantIntegration?
+  orders            Order[]
+  productMappings   ProductMapping[]
+  conversations     MessengerConversation[]
+  knowledgeExamples KnowledgeExample[]
+}
+
+/// One row per tenant — holds integration mode + JSON config (credentials live here; encrypt at rest in production)
+model TenantIntegration {
+  id        String          @id @default(cuid())
+  tenantId  String          @unique
+  tenant    Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  type      IntegrationType
+  /// API: { baseUrl, headers, paths: { products, createOrder, ... } }
+  /// DATABASE: { engine: "mysql"|"postgres", connection: {...}, tables: {...} }
+  /// WEBHOOK: { outboundUrl, outboundSecret, inboundSecret }
+  config    Json
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+}
+
+model ProductMapping {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  clientSku     String
+  facebookLabel String?
+  metadata      Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([tenantId, clientSku])
+  @@index([tenantId])
+}
+
+model MessengerConversation {
+  id               String    @id @default(cuid())
+  tenantId         String
+  tenant           Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  psid             String
+  lastUserMsgAt    DateTime  @default(now())
+  lastBotMsgAt     DateTime?
+  /// Last extracted draft order JSON from LLM (not committed until validated)
+  pendingDraftJson Json?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  messages MessengerMessage[]
+
+  @@unique([tenantId, psid])
+  @@index([tenantId])
+}
+
+/// Per-turn conversation history. Used for context (last N) + as a source for KnowledgeExample.
+model MessengerMessage {
+  id             String                @id @default(cuid())
+  conversationId String
+  conversation   MessengerConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  /// "user" (customer) or "assistant" (bot/operator)
+  role           String
+  text           String                @db.Text
+  /// Optional list of image URLs the user attached
+  imageUrls      String[]              @default([])
+  /// Graph message id for this row (webhook `message.mid` when known)
+  facebookMessageId        String?
+  /// When the customer used Messenger "reply", the parent message id they replied to
+  replyToFacebookMessageId String?
+  createdAt      DateTime              @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([conversationId, facebookMessageId])
+}
+
+/// Retrieved-augmented generation knowledge base — past customer→assistant pairs from imports
+/// or live conversations. Embedding is stored as Float[] for in-process cosine similarity.
+model KnowledgeExample {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// Source: "import" | "live"
+  source        String   @default("import")
+  /// What the customer wrote
+  userText      String   @db.Text
+  /// How the merchant replied (the "voice" we want to imitate)
+  assistantText String   @db.Text
+  /// Embedding of userText (e.g. 768 dims for nomic-embed-text)
+  embedding     Float[]
+  /// Free metadata: tags, products, language, etc.
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt])
+}
+
+model Order {
+  id                    String         @id @default(cuid())
+  tenantId              String
+  tenant                Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// Facebook sender page-scoped id
+  messengerPsid         String
+  /// Structured extraction from LLM (validated before client sync)
+  structuredData        Json
+  status                OrderStatus    @default(DRAFT)
+  paymentStatus         PaymentStatus  @default(PENDING)
+  deliveryStatus        DeliveryStatus @default(NONE)
+  /// Id returned by client system after sync
+  externalOrderId       String?
+  /// SSLCommerz session / transaction references
+  sslcommerzTranId      String?        @unique
+  sslcommerzSessionKey  String?
+  /// Pathao
+  pathaoConsignmentId   String?
+  pathaoMerchantOrderId String?
+  totalAmount           Decimal?       @db.Decimal(12, 2)
+  currency              String         @default("BDT")
+  failureReason         String?
+  /// "SSLCOMMERZ" | "BKASH_MANUAL" | "NAGAD_MANUAL" — which rail this order is using
+  paymentMethod         String         @default("SSLCOMMERZ")
+  /// Customer-supplied transaction id when paying via personal bKash/Nagad
+  manualTxnId           String?
+  /// Free-form note (admin or bot) about manual verification
+  manualPaymentNote     String?
+  /// Admin user id who marked this paid manually (audit trail)
+  manuallyVerifiedBy    String?
+  manuallyVerifiedAt    DateTime?
+  /// Public URL of the generated invoice PDF
+  invoiceUrl            String?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  @@index([tenantId])
+  @@index([tenantId, messengerPsid])
+  @@index([sslcommerzTranId])
+}

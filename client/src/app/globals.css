@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --leading-tight: 1.12;
+  --leading-snug: 1.35;
+  --leading-body: 1.65;
+  --tracking-display: -0.035em;
+  --tracking-ui: -0.015em;
+}
+
+html {
+  scroll-behavior: smooth;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  @apply min-h-screen bg-surface-950 text-slate-100 antialiased;
+  font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
+  letter-spacing: var(--tracking-ui);
+}
+
+@layer base {
+  p {
+    line-height: var(--leading-body);
+  }
+}
+
+/* subtle scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(99, 102, 241, 0.35) transparent;
+}
+
+::selection {
+  @apply bg-accent/40 text-white;
+}
+
+@layer utilities {
+  .text-gradient {
+    @apply bg-gradient-to-br from-white via-indigo-100 to-violet-300 bg-clip-text text-transparent;
+  }
+  .text-gradient-accent {
+    @apply bg-gradient-to-r from-indigo-200 via-violet-200 to-fuchsia-200 bg-clip-text text-transparent;
+  }
+  .border-glass {
+    @apply border border-white/[0.08] bg-white/[0.03] backdrop-blur-xl;
+  }
+  /** Micro-labels: caps + wide tracking */
+  .label-caps {
+    @apply font-sans text-[0.6875rem] font-semibold uppercase tracking-[0.22em] text-slate-500;
+  }
+  /** Numbers & IDs */
+  .tabular-figures {
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+  /** Portal page titles — oversized display */
+  .title-page {
+    @apply font-display font-bold tracking-display text-white;
+    font-size: clamp(1.875rem, 1.4rem + 1.8vw, 2.75rem);
+    line-height: var(--leading-tight);
+    letter-spacing: var(--tracking-display);
+  }
+  .title-section {
+    @apply font-display font-semibold text-white;
+    letter-spacing: -0.03em;
+  }
+}
