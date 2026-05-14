@@ -46,7 +46,7 @@ import {
   isSimulatorPsid,
 } from "../integrations/facebook/messengerService.js";
 import { runWithMessengerReplyTo } from "../integrations/facebook/messengerReplyContext.js";
-import { createPathaoOrder, type PathaoTenantConfig } from "../integrations/pathao/pathaoService.js";
+import { createPathaoOrder, getPathaoOrderStatus, type PathaoTenantConfig } from "../integrations/pathao/pathaoService.js";
 import { config } from "../config/index.js";
 import { parseTenantSettings } from "../types/tenant-settings.js";
 import type { StructuredOrder } from "../types/order-extraction.js";
@@ -124,6 +124,7 @@ function isLikelyProductQuery(text: string): boolean {
   const t = text.trim().toLowerCase();
   if (!t) return false;
   if (looksLikeNegotiationOrGeneralQuestion(t)) return false;
+  if (looksLikeGeneralInfoQuestion(t)) return false;
   if (JERSEY_ENTITY_HINT.test(t)) {
     return true;
   }
@@ -133,6 +134,19 @@ function isLikelyProductQuery(text: string): boolean {
   if (/\b(price|stock|available|size|photo|image|chobi|tk|bdt)\b/i.test(t)) {
     return true;
   }
+  return false;
+}
+
+function looksLikeGeneralInfoQuestion(t: string): boolean {
+  const hasComparisonKeyword = /\b(difference|diff|parthokyo|farak|fark|vs|versus|compare|comparison|better|valo|bhalo|quality)\b/i.test(t);
+  const hasQuestionIndicator = /\b(ki|kি|ache|hobe|ase|bolo|bolun|bolben|explain|tell|বলো|বলুন)\b/i.test(t) ||
+    /\?/.test(t) ||
+    /\b(ache\s*tho|ache\s*ki|ki\s*difference|ki\s*farak)\b/i.test(t);
+  const hasVersionKeywords = /\b(fan\s*version|player\s*version|authentic|replica)\b/i.test(t);
+  const hasNoTeamName = !JERSEY_ENTITY_HINT.test(t);
+
+  if (hasVersionKeywords && hasComparisonKeyword && hasNoTeamName) return true;
+  if (hasVersionKeywords && hasQuestionIndicator && hasNoTeamName && !/\b(lagbe|nibo|chai|dorkar|order|buy|dekhao|show)\b/i.test(t)) return true;
   return false;
 }
 
@@ -669,6 +683,7 @@ function classifyCatalogIntent(text: string): CatalogIntent {
   if (!t) return "general";
   if (isOrderClarificationQuestion(text)) return "general";
   if (looksLikeNegotiationOrGeneralQuestion(t)) return "general";
+  if (looksLikeGeneralInfoQuestion(t)) return "general";
   // If the message is clearly the customer supplying checkout details (phone /
   // multi-line address + size), don't misroute to size-chart even if the word
   // "size" appears.
@@ -2963,6 +2978,23 @@ export async function handleInboundMessengerMessage(params: {
     }
   }
 
+  // --- Post-order cooldown ---
+  // If the customer just confirmed/paid an order within the last 30 min and the cart is empty,
+  // treat all messages as general chat. Don't try to push products again.
+  const POST_ORDER_COOLDOWN_MS = 30 * 60 * 1000;
+  const recentPaidOrder = await prisma.order.findFirst({
+    where: {
+      tenantId: params.tenantId,
+      messengerPsid: params.psid,
+      paymentStatus: { in: ["PAID"] },
+      updatedAt: { gte: new Date(Date.now() - POST_ORDER_COOLDOWN_MS) },
+    },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true },
+  });
+  const cartItems = getCartItemsFromDraft(convo.pendingDraftJson);
+  const hasJustCompletedOrder = !!recentPaidOrder && cartItems.length === 0;
+
   const lastSku = repliedToProductSku || getLastCatalogSkuFromDraft(convo.pendingDraftJson);
   const lastRow = lastSku ? mappings.find((m) => m.clientSku === lastSku) ?? null : null;
   const earlyCartIntent = detectCartIntent(trimmed);
@@ -2976,6 +3008,7 @@ export async function handleInboundMessengerMessage(params: {
       : null;
   const earlyIntent = classifyCatalogIntent(trimmed);
   const catalogMatcherEligible =
+    !hasJustCompletedOrder &&
     mappings.length > 0 &&
     (hasIncomingImages ||
       isLikelyProductQuery(trimmed) ||
@@ -4807,6 +4840,18 @@ async function runPostPaymentPipeline(opts: {
           deliveryStatus: "BOOKED",
         },
       });
+
+      if (order.tenant.facebookPageAccessToken) {
+        scheduleTrackingNotification({
+          orderId: order.id,
+          consignmentId: delivery.consignmentId,
+          tenantId,
+          psid: order.messengerPsid,
+          pageAccessToken: order.tenant.facebookPageAccessToken,
+          pathaoCfg,
+          bookedAt: Date.now(),
+        });
+      }
     } catch (e) {
       logger.error({ e, orderId: order.id }, "Pathao booking failed");
       await prisma.order.update({
@@ -4893,4 +4938,73 @@ async function runPostPaymentPipeline(opts: {
 export async function findOrderIdBySslTranId(tranId: string): Promise<string | null> {
   const o = await prisma.order.findFirst({ where: { sslcommerzTranId: tranId } });
   return o?.id ?? null;
+}
+
+// ─── Tracking Number Auto-Send ───────────────────────────────────────────────
+
+const TRACKING_CHECK_INTERVAL_MS = 30 * 60 * 1000; // check every 30 minutes
+const TRACKING_MAX_AGE_MS = 23 * 60 * 60 * 1000; // stop checking after 23 hours
+
+/**
+ * Schedules periodic checks for a Pathao tracking number.
+ * Sends it to the customer via Messenger as soon as available.
+ * Stops checking after 23 hours — after that, only send if customer asks.
+ */
+export function scheduleTrackingCheck(opts: {
+  orderId: string;
+  consignmentId: string;
+  tenantId: string;
+  psid: string;
+  pageAccessToken: string;
+  pathaoCfg: PathaoTenantConfig;
+  bookedAt: number;
+}): void {
+  scheduleTrackingNotification(opts);
+}
+
+function scheduleTrackingNotification(opts: {
+  orderId: string;
+  consignmentId: string;
+  tenantId: string;
+  psid: string;
+  pageAccessToken: string;
+  pathaoCfg: PathaoTenantConfig;
+  bookedAt: number;
+}): void {
+  const { orderId, consignmentId, tenantId, psid, pageAccessToken, pathaoCfg, bookedAt } = opts;
+
+  const timer = setInterval(async () => {
+    const elapsed = Date.now() - bookedAt;
+    if (elapsed > TRACKING_MAX_AGE_MS) {
+      clearInterval(timer);
+      logger.info({ orderId, consignmentId }, "Tracking check expired (23h), stopping");
+      return;
+    }
+
+    try {
+      const status = await getPathaoOrderStatus(pathaoCfg, consignmentId);
+      if (status.trackingId && status.trackingId !== consignmentId) {
+        clearInterval(timer);
+        const trackingUrl = `https://merchant.pathao.com/tracking?consignment_id=${encodeURIComponent(status.trackingId)}`;
+        const convo = await prisma.messengerConversation.findUnique({
+          where: { tenantId_psid: { tenantId, psid } },
+        });
+        const within24h = convo ? isWithinMessagingWindow(convo.lastUserMsgAt) : false;
+
+        const msg = [
+          "📦 Delivery Update!",
+          "",
+          `🔗 Tracking ID: ${status.trackingId}`,
+          `📍 Track: ${trackingUrl}`,
+          "",
+          "Apnar parcel ship hoye geche! 🚚",
+        ].join("\n");
+
+        await sendMessengerText({ pageAccessToken, psid, text: msg, within24hWindow: within24h });
+        logger.info({ orderId, trackingId: status.trackingId }, "Tracking number sent to customer");
+      }
+    } catch (e) {
+      logger.warn({ e: String(e), orderId, consignmentId }, "Tracking check failed, will retry");
+    }
+  }, TRACKING_CHECK_INTERVAL_MS);
 }

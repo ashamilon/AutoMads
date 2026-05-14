@@ -24,7 +24,7 @@ import {
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type TabId = "general" | "pages" | "payments" | "courier" | "size-charts" | "persona" | "catalog" | "advanced";
+type TabId = "general" | "pages" | "payments" | "courier" | "size-charts" | "persona" | "catalog" | "social" | "advanced";
 
 type SizeChartRow = {
   size: string;
@@ -197,6 +197,7 @@ export default function SettingsPage() {
       { id: "size-charts" as const, label: "Size charts" },
       { id: "persona" as const, label: "Bot persona" },
       { id: "catalog" as const, label: "Catalog" },
+      { id: "social" as const, label: "Social Accounts" },
       { id: "advanced" as const, label: "Advanced JSON" },
     ],
     [],
@@ -1552,6 +1553,12 @@ export default function SettingsPage() {
         </Section>
       )}
 
+      {tab === "social" && (
+        <div className="space-y-6">
+          <SocialAccountsSection settings={settings} setSettings={setSettings} inputCls={inputCls} />
+        </div>
+      )}
+
       {tab === "advanced" && (
         <Section
           title="Raw settings JSON"
@@ -1865,5 +1872,272 @@ function StatusPill({ state }: { state: TestState }) {
       <XCircle className="h-3 w-3 shrink-0" />
       <span className="truncate">{state.message ?? "Failed"}</span>
     </span>
+  );
+}
+
+// ─── Social Accounts Section ─────────────────────────────────────────────────
+
+function SocialAccountsSection({
+  settings,
+  setSettings,
+  inputCls,
+}: {
+  settings: Record<string, any>;
+  setSettings: React.Dispatch<React.SetStateAction<any>>;
+  inputCls: string;
+}) {
+  const [igValidating, setIgValidating] = useState(false);
+  const [igStatus, setIgStatus] = useState<"idle" | "ok" | "fail">("idle");
+  const [igError, setIgError] = useState("");
+  const [tiktokValidating, setTiktokValidating] = useState(false);
+  const [tiktokStatus, setTiktokStatus] = useState<"idle" | "ok" | "fail">("idle");
+  const [tiktokError, setTiktokError] = useState("");
+
+  const igUserId = settings?.instagram?.igUserId ?? "";
+  const igEnabled = settings?.instagram?.enabled ?? false;
+  const tiktokClientKey = settings?.tiktok?.clientKey ?? "";
+  const tiktokClientSecret = settings?.tiktok?.clientSecret ?? "";
+  const tiktokAccessToken = settings?.tiktok?.accessToken ?? "";
+  const tiktokEnabled = settings?.tiktok?.enabled ?? false;
+
+  const validateInstagram = async () => {
+    if (!igUserId.trim()) { setIgError("Enter your IG User ID first"); setIgStatus("fail"); return; }
+    setIgValidating(true);
+    setIgError("");
+    try {
+      const res = await apiFetch<{ ok?: boolean; error?: string }>("/api/v1/social/validate-instagram", {
+        method: "POST",
+        body: JSON.stringify({ igUserId: igUserId.trim() }),
+      });
+      if (res.ok) {
+        setIgStatus("ok");
+      } else {
+        setIgStatus("fail");
+        setIgError(res.error ?? "Validation failed");
+      }
+    } catch (e: any) {
+      setIgStatus("fail");
+      setIgError(e?.message ?? "Connection failed");
+    }
+    setIgValidating(false);
+  };
+
+  const validateTiktok = async () => {
+    if (!tiktokAccessToken.trim()) { setTiktokError("Enter your TikTok access token first"); setTiktokStatus("fail"); return; }
+    setTiktokValidating(true);
+    setTiktokError("");
+    try {
+      const res = await apiFetch<{ ok?: boolean; error?: string }>("/api/v1/social/validate-tiktok", {
+        method: "POST",
+        body: JSON.stringify({ accessToken: tiktokAccessToken.trim() }),
+      });
+      if (res.ok) {
+        setTiktokStatus("ok");
+      } else {
+        setTiktokStatus("fail");
+        setTiktokError(res.error ?? "Validation failed");
+      }
+    } catch (e: any) {
+      setTiktokStatus("fail");
+      setTiktokError(e?.message ?? "Connection failed");
+    }
+    setTiktokValidating(false);
+  };
+
+  return (
+    <>
+      {/* Instagram */}
+      <Section
+        title="Instagram"
+        description="Connect your Instagram Business account for auto-posting. Uses the same Page Access Token from your Facebook Page."
+      >
+        <div className="space-y-4">
+          <div className="flex items-start gap-4">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center flex-shrink-0">
+              <svg viewBox="0 0 24 24" className="w-5 h-5 text-white" fill="currentColor">
+                <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z"/>
+              </svg>
+            </div>
+            <div className="flex-1">
+              <h4 className="text-sm font-semibold text-slate-200">Instagram Business</h4>
+              <p className="text-xs text-slate-500 mt-0.5">Requires Instagram Business/Creator account linked to your Facebook Page</p>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={igEnabled}
+                onChange={(e) =>
+                  setSettings((s: any) => ({
+                    ...s,
+                    instagram: { ...(s?.instagram ?? {}), enabled: e.target.checked },
+                  }))
+                }
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-slate-600 rounded-full peer peer-checked:bg-indigo-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
+            </label>
+          </div>
+
+          <div className="pl-14 space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1">Instagram User ID</label>
+              <input
+                value={igUserId}
+                onChange={(e) =>
+                  setSettings((s: any) => ({
+                    ...s,
+                    instagram: { ...(s?.instagram ?? {}), igUserId: e.target.value },
+                  }))
+                }
+                placeholder="e.g. 17841400123456789"
+                className={inputCls}
+              />
+              <p className="mt-1.5 text-[11px] text-slate-500 leading-relaxed">
+                Go to <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener" className="text-indigo-400 hover:underline">Graph API Explorer</a> → select your Page token → run: <code className="bg-black/30 px-1 py-0.5 rounded text-[10px] text-indigo-300">GET /me?fields=instagram_business_account</code>
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={validateInstagram}
+                disabled={igValidating}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/20 transition disabled:opacity-50"
+              >
+                {igValidating ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plug className="w-3 h-3" />}
+                Validate Connection
+              </button>
+              {igStatus === "ok" && (
+                <span className="flex items-center gap-1 text-xs text-emerald-400">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> Connected
+                </span>
+              )}
+              {igStatus === "fail" && (
+                <span className="text-xs text-red-400">{igError}</span>
+              )}
+            </div>
+          </div>
+        </div>
+      </Section>
+
+      {/* TikTok */}
+      <Section
+        title="TikTok"
+        description="Connect your TikTok account for auto-posting product videos and images via the Content Posting API."
+      >
+        <div className="space-y-4">
+          <div className="flex items-start gap-4">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-slate-900 to-slate-700 border border-white/10 flex items-center justify-center flex-shrink-0">
+              <svg viewBox="0 0 24 24" className="w-5 h-5 text-white" fill="currentColor">
+                <path d="M19.59 6.69a4.83 4.83 0 01-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 01-2.88 2.88 2.89 2.89 0 01-2.88-2.88 2.89 2.89 0 012.88-2.88c.28 0 .55.04.81.1v-3.49a6.37 6.37 0 00-.81-.05A6.34 6.34 0 003.15 15.7a6.34 6.34 0 006.34 6.34 6.34 6.34 0 006.34-6.34V9.4a8.16 8.16 0 004.76 1.52v-3.4a4.85 4.85 0 01-1-.83z"/>
+              </svg>
+            </div>
+            <div className="flex-1">
+              <h4 className="text-sm font-semibold text-slate-200">TikTok for Business</h4>
+              <p className="text-xs text-slate-500 mt-0.5">Requires a TikTok Developer App with Content Posting API access</p>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={tiktokEnabled}
+                onChange={(e) =>
+                  setSettings((s: any) => ({
+                    ...s,
+                    tiktok: { ...(s?.tiktok ?? {}), enabled: e.target.checked },
+                  }))
+                }
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-slate-600 rounded-full peer peer-checked:bg-indigo-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
+            </label>
+          </div>
+
+          <div className="pl-14 space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1">Client Key</label>
+              <input
+                value={tiktokClientKey}
+                onChange={(e) =>
+                  setSettings((s: any) => ({
+                    ...s,
+                    tiktok: { ...(s?.tiktok ?? {}), clientKey: e.target.value },
+                  }))
+                }
+                placeholder="awXXXXXXXXXXXXXX"
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1">Client Secret</label>
+              <input
+                type="password"
+                value={tiktokClientSecret}
+                onChange={(e) =>
+                  setSettings((s: any) => ({
+                    ...s,
+                    tiktok: { ...(s?.tiktok ?? {}), clientSecret: e.target.value },
+                  }))
+                }
+                placeholder="••••••••••••"
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1">Access Token</label>
+              <input
+                type="password"
+                value={tiktokAccessToken}
+                onChange={(e) =>
+                  setSettings((s: any) => ({
+                    ...s,
+                    tiktok: { ...(s?.tiktok ?? {}), accessToken: e.target.value },
+                  }))
+                }
+                placeholder="act.XXXXXXXXXXXX"
+                className={inputCls}
+              />
+              <p className="mt-1.5 text-[11px] text-slate-500 leading-relaxed">
+                Create an app at <a href="https://developers.tiktok.com" target="_blank" rel="noopener" className="text-indigo-400 hover:underline">developers.tiktok.com</a> → enable Content Posting API → get OAuth access token
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={validateTiktok}
+                disabled={tiktokValidating}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/20 transition disabled:opacity-50"
+              >
+                {tiktokValidating ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plug className="w-3 h-3" />}
+                Validate Connection
+              </button>
+              {tiktokStatus === "ok" && (
+                <span className="flex items-center gap-1 text-xs text-emerald-400">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> Connected
+                </span>
+              )}
+              {tiktokStatus === "fail" && (
+                <span className="text-xs text-red-400">{tiktokError}</span>
+              )}
+            </div>
+          </div>
+
+          <div className="pl-14 pt-2 border-t border-white/[0.04]">
+            <details className="group">
+              <summary className="cursor-pointer text-xs text-slate-400 hover:text-slate-300 transition">
+                How to set up TikTok Developer App
+              </summary>
+              <ol className="mt-2 space-y-1.5 text-[11px] text-slate-500 list-decimal list-inside leading-relaxed">
+                <li>Go to <a href="https://developers.tiktok.com" target="_blank" rel="noopener" className="text-indigo-400 hover:underline">developers.tiktok.com</a> and sign in</li>
+                <li>Create a new app → select "Content Posting API"</li>
+                <li>Add your redirect URL (e.g. <code className="bg-black/30 px-1 py-0.5 rounded text-indigo-300">https://your-domain.com/callback</code>)</li>
+                <li>Submit for review (usually approved in 1-2 days)</li>
+                <li>Once approved, get your Client Key & Secret from the app dashboard</li>
+                <li>Generate an Access Token via OAuth 2.0 flow</li>
+                <li>Paste all three values above and click "Validate Connection"</li>
+              </ol>
+            </details>
+          </div>
+        </div>
+      </Section>
+    </>
   );
 }

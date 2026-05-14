@@ -24,6 +24,14 @@ import {
   syncProductMappingsFromDatabase,
   syncCloudinaryCatalogImages,
   upsertProductMapping,
+  listScheduledPosts,
+  createScheduledPost,
+  updateScheduledPost,
+  deleteScheduledPost,
+  publishScheduledPostNow,
+  generatePostCaption,
+  validateInstagram,
+  validateTiktok,
 } from "../controllers/tenantPortalController.js";
 import { learnPersonaFromUploads } from "../controllers/personaLearnController.js";
 import { testPathao, testSslcommerz, testTelegram } from "../controllers/integrationTestController.js";
@@ -108,6 +116,18 @@ tenantPortalRoutes.post("/product-mappings/sync-from-db", syncProductMappingsFro
 tenantPortalRoutes.post("/product-mappings/sync-cloudinary-images", syncCloudinaryCatalogImages);
 tenantPortalRoutes.post("/product-mappings", upsertProductMapping);
 tenantPortalRoutes.delete("/product-mappings/:clientSku", deleteProductMapping);
+
+// Scheduled posts (content calendar)
+tenantPortalRoutes.get("/scheduled-posts", listScheduledPosts);
+tenantPortalRoutes.post("/scheduled-posts", createScheduledPost);
+tenantPortalRoutes.patch("/scheduled-posts/:id", updateScheduledPost);
+tenantPortalRoutes.delete("/scheduled-posts/:id", deleteScheduledPost);
+tenantPortalRoutes.post("/scheduled-posts/:id/publish-now", publishScheduledPostNow);
+tenantPortalRoutes.post("/generate-caption", generatePostCaption);
+
+// Social account validation
+tenantPortalRoutes.post("/social/validate-instagram", validateInstagram);
+tenantPortalRoutes.post("/social/validate-tiktok", validateTiktok);
 
 tenantPortalRoutes.get("/training-json", getTrainingJsonCorpus);
 tenantPortalRoutes.delete("/training-json", deleteTrainingJsonCorpus);

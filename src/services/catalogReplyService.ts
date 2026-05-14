@@ -801,10 +801,6 @@ export function buildDeterministicCatalogReply(
     sections.push(`✨ Add-ons Available\n${addonLines.join("\n")}`);
   }
 
-  if (opts.includeCta !== false) {
-    sections.push("🛒 Order korte: Product Name + Size + Quantity likhe din ✅");
-  }
-
   return sections.join("\n\n");
 }
 

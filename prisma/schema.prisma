@@ -65,6 +65,7 @@ model Tenant {
   productMappings   ProductMapping[]
   conversations     MessengerConversation[]
   knowledgeExamples KnowledgeExample[]
+  scheduledPosts    ScheduledPost[]
 }
 
 /// One row per tenant — holds integration mode + JSON config (credentials live here; encrypt at rest in production)
@@ -153,6 +154,28 @@ model KnowledgeExample {
 
   @@index([tenantId])
   @@index([tenantId, createdAt])
+}
+
+model ScheduledPost {
+  id            String    @id @default(cuid())
+  tenantId      String
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  platform      String    // "facebook" | "instagram" | "both"
+  postType      String    // "product_showcase" | "collection" | "story" | "custom"
+  caption       String    @db.Text
+  imageUrls     Json      // string[] from Cloudinary
+  productSkus   Json?     // optional: string[] of linked product SKUs
+  scheduledAt   DateTime
+  publishedAt   DateTime?
+  status        String    @default("scheduled") // "scheduled" | "published" | "failed" | "draft"
+  fbPostId      String?
+  igMediaId     String?
+  failureReason String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([tenantId, scheduledAt])
+  @@index([status, scheduledAt])
 }
 
 model Order {

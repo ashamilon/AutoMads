@@ -190,6 +190,34 @@ export type CreateDeliveryInput = {
   amountToCollect?: number;
 };
 
+/** Get Pathao order status including tracking number */
+export async function getPathaoOrderStatus(cfg: PathaoTenantConfig, consignmentId: string): Promise<{
+  status: string;
+  trackingId?: string;
+}> {
+  const { token, apiStyle, baseUrl } = await getToken(cfg);
+  const base = baseUrl.replace(/\/$/, "");
+  const client = http(base);
+  const path = apiStyle === "aladdin"
+    ? `/aladdin/api/v1/orders/${consignmentId}`
+    : `/api/v1/merchant/orders/${consignmentId}`;
+
+  const res = await client.get(path, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+  });
+
+  if (res.status >= 400) {
+    logger.warn({ status: res.status, consignmentId }, "Pathao order status check failed");
+    return { status: "unknown" };
+  }
+
+  const data = res.data as { data?: { order_status?: string; tracking_id?: string; consignment_id?: string } };
+  return {
+    status: data.data?.order_status ?? "unknown",
+    trackingId: data.data?.tracking_id ?? data.data?.consignment_id ?? undefined,
+  };
+}
+
 /** Create Pathao parcel — only call after payment is confirmed */
 export async function createPathaoOrder(cfg: PathaoTenantConfig, input: CreateDeliveryInput): Promise<{
   consignmentId: string;

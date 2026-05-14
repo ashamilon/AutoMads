@@ -5,6 +5,7 @@ import { useTenant } from "@/context/tenant-context";
 import { getBrandLogoUrl, getBrandNameUrl } from "@/lib/branding";
 import {
   Cable,
+  CalendarDays,
   Files,
   HelpCircle,
   LayoutDashboard,
@@ -29,6 +30,7 @@ const groups: NavGroup[] = [
       { href: "/portal/orders", label: "Orders", icon: ShoppingBag },
       { href: "/portal/catalog", label: "Catalog map", icon: Package },
       { href: "/portal/sandbox", label: "Chat sandbox", icon: MessageCircleMore },
+      { href: "/portal/content-calendar", label: "Content Calendar", icon: CalendarDays },
       { href: "/portal/training-data", label: "Training JSON", icon: Files },
     ],
   },

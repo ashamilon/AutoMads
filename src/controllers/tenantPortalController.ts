@@ -11,15 +11,16 @@ import {
   listAllCloudinaryImages,
   mergeMetadataImages,
 } from "../services/cloudinaryCatalogImageSync.js";
-import { confirmManualPayment } from "../services/orderWorkflowService.js";
+import { confirmManualPayment, scheduleTrackingCheck } from "../services/orderWorkflowService.js";
 import { generateInvoicePdf } from "../services/invoicePdfService.js";
-import { createPathaoOrder, type PathaoTenantConfig } from "../integrations/pathao/pathaoService.js";
+import { createPathaoOrder, getPathaoOrderStatus, type PathaoTenantConfig } from "../integrations/pathao/pathaoService.js";
 import { logger } from "../utils/logger.js";
 import { z } from "zod";
 import { config } from "../config/index.js";
 import { parseTenantSettings } from "../types/tenant-settings.js";
 import { resolveCloudinaryListArgs } from "../utils/resolveCloudinaryTenantOrEnv.js";
 import { handleInboundMessengerMessage } from "../services/orderWorkflowService.js";
+import axios from "axios";
 
 export async function getMe(req: Request, res: Response): Promise<void> {
   const t = req.tenant!;
@@ -520,6 +521,20 @@ export async function bookPathao(req: Request, res: Response): Promise<void> {
         deliveryStatus: "BOOKED",
       },
     });
+
+    const tenant = await prisma.tenant.findUnique({ where: { id: order.tenantId } });
+    if (tenant?.facebookPageAccessToken) {
+      scheduleTrackingCheck({
+        orderId: order.id,
+        consignmentId: delivery.consignmentId,
+        tenantId: order.tenantId,
+        psid: order.messengerPsid,
+        pageAccessToken: tenant.facebookPageAccessToken,
+        pathaoCfg,
+        bookedAt: Date.now(),
+      });
+    }
+
     res.json({ ok: true, consignmentId: delivery.consignmentId, order: updated });
   } catch (e) {
     logger.error({ e, orderId }, "Manual Pathao booking failed");
@@ -667,4 +682,157 @@ export async function previewInvoice(req: Request, res: Response): Promise<void>
     paid: true,
   });
   res.json({ ok: true, url: preview.publicUrl });
+}
+
+// ─── Scheduled Posts (Content Calendar) ──────────────────────────────────────
+
+import { publishScheduledPost as doPublish, generateCaption } from "../services/socialPostService.js";
+
+export async function listScheduledPosts(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const posts = await prisma.scheduledPost.findMany({
+    where: { tenantId: t.id },
+    orderBy: { scheduledAt: "desc" },
+    take: 100,
+  });
+  res.json(posts);
+}
+
+export async function createScheduledPost(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const { platform, postType, caption, imageUrls, productSkus, scheduledAt, status } = req.body;
+
+  if (!caption || !scheduledAt) {
+    res.status(400).json({ error: "caption and scheduledAt are required" });
+    return;
+  }
+
+  const post = await prisma.scheduledPost.create({
+    data: {
+      tenantId: t.id,
+      platform: platform ?? "facebook",
+      postType: postType ?? "product_showcase",
+      caption,
+      imageUrls: imageUrls ?? [],
+      productSkus: productSkus ?? null,
+      scheduledAt: new Date(scheduledAt),
+      status: status ?? "scheduled",
+    },
+  });
+  res.status(201).json(post);
+}
+
+export async function updateScheduledPost(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const id = req.params.id as string;
+  const existing = await prisma.scheduledPost.findFirst({ where: { id, tenantId: t.id } });
+  if (!existing) { res.status(404).json({ error: "not_found" }); return; }
+  if (existing.status === "published") { res.status(400).json({ error: "cannot_edit_published" }); return; }
+
+  const { platform, postType, caption, imageUrls, productSkus, scheduledAt, status } = req.body;
+  const updated = await prisma.scheduledPost.update({
+    where: { id },
+    data: {
+      ...(platform != null ? { platform } : {}),
+      ...(postType != null ? { postType } : {}),
+      ...(caption != null ? { caption } : {}),
+      ...(imageUrls != null ? { imageUrls } : {}),
+      ...(productSkus !== undefined ? { productSkus } : {}),
+      ...(scheduledAt != null ? { scheduledAt: new Date(scheduledAt) } : {}),
+      ...(status != null ? { status } : {}),
+    },
+  });
+  res.json(updated);
+}
+
+export async function deleteScheduledPost(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const id = req.params.id as string;
+  const existing = await prisma.scheduledPost.findFirst({ where: { id, tenantId: t.id } });
+  if (!existing) { res.status(404).json({ error: "not_found" }); return; }
+
+  await prisma.scheduledPost.delete({ where: { id } });
+  res.json({ ok: true });
+}
+
+export async function publishScheduledPostNow(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const id = req.params.id as string;
+  const existing = await prisma.scheduledPost.findFirst({ where: { id, tenantId: t.id } });
+  if (!existing) { res.status(404).json({ error: "not_found" }); return; }
+  if (existing.status === "published") { res.status(400).json({ error: "already_published" }); return; }
+
+  try {
+    await doPublish(id);
+    const refreshed = await prisma.scheduledPost.findUnique({ where: { id } });
+    res.json(refreshed);
+  } catch (e) {
+    res.status(500).json({ error: "publish_failed", detail: String(e) });
+  }
+}
+
+export async function generatePostCaption(req: Request, res: Response): Promise<void> {
+  const { productNames, prices, tags, postType, language } = req.body;
+  if (!productNames || !Array.isArray(productNames) || productNames.length === 0) {
+    res.status(400).json({ error: "productNames array required" });
+    return;
+  }
+  const caption = await generateCaption({
+    productNames,
+    prices: prices ?? [],
+    tags: tags ?? [],
+    postType: postType ?? "product_showcase",
+    language: language ?? "banglish",
+  });
+  res.json({ caption });
+}
+
+// ─── Social Account Validation ───────────────────────────────────────────────
+
+export async function validateInstagram(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const { igUserId } = req.body;
+  if (!igUserId) { res.status(400).json({ ok: false, error: "igUserId required" }); return; }
+
+  const pageAccessToken = t.facebookPageAccessToken;
+  if (!pageAccessToken) {
+    res.json({ ok: false, error: "No Facebook Page Access Token configured. Set it up in the Pages tab first." });
+    return;
+  }
+
+  try {
+    const resp = await axios.get(
+      `https://graph.facebook.com/v21.0/${igUserId}`,
+      { params: { fields: "id,username,name,profile_picture_url", access_token: pageAccessToken } },
+    );
+    const data = resp.data;
+    res.json({ ok: true, username: data.username, name: data.name, profilePicture: data.profile_picture_url });
+  } catch (e: any) {
+    const msg = e?.response?.data?.error?.message ?? String(e);
+    res.json({ ok: false, error: msg });
+  }
+}
+
+export async function validateTiktok(req: Request, res: Response): Promise<void> {
+  const { accessToken } = req.body;
+  if (!accessToken) { res.status(400).json({ ok: false, error: "accessToken required" }); return; }
+
+  try {
+    const resp = await axios.get(
+      "https://open.tiktokapis.com/v2/user/info/",
+      {
+        params: { fields: "open_id,display_name,avatar_url" },
+        headers: { Authorization: `Bearer ${accessToken}` },
+      },
+    );
+    const data = resp.data?.data?.user;
+    if (data) {
+      res.json({ ok: true, displayName: data.display_name, avatar: data.avatar_url });
+    } else {
+      res.json({ ok: false, error: "Could not fetch TikTok user info" });
+    }
+  } catch (e: any) {
+    const msg = e?.response?.data?.error?.message ?? e?.response?.data?.message ?? String(e);
+    res.json({ ok: false, error: msg });
+  }
 }
