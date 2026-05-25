@@ -234,7 +234,7 @@ export default function LandingPage() {
               <div>
                 <p className="label-caps mb-3">Stack</p>
                 <h2 className="text-xl font-bold tracking-tight text-white">
-                  Express · Prisma · Supabase · Ollama · Next.js
+                  Express · Prisma · PostgreSQL · Ollama · Next.js
                 </h2>
                 <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-400">
                   Backend on Express (port 4000) handles webhooks and serves this portal's API.

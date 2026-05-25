@@ -5,8 +5,39 @@ export const tenantSettingsSchema = z
     defaultOrderAmountBdt: z.number().positive().optional(),
     /** Delivery charge shown to customers during checkout/order confirmation. */
     deliveryChargeBdt: z.number().min(0).optional(),
-    /** Advance amount required before processing the order. */
+    /**
+     * Legacy fixed advance amount. Treated as `advancePolicy: { mode: "fixed", fixedAmountBdt }`
+     * when `advancePolicy` is not set. Kept for backward compatibility — new tenants should set
+     * `advancePolicy` instead.
+     */
     advancePaymentBdt: z.number().min(0).optional(),
+    /**
+     * Structured advance policy. When present, takes precedence over `advancePaymentBdt`.
+     *
+     * - mode="fixed": one amount per order, regardless of cart size.
+     * - mode="per_product":
+     *   - perProductBdt          → multiplied by quantity for plain (no-add-on) cart lines
+     *   - perCustomisedProductBdt → multiplied by quantity for lines that have any add-ons
+     *   Both can be set simultaneously; a mixed cart pays both.
+     */
+    advancePolicy: z
+      .union([
+        z.object({
+          mode: z.literal("fixed"),
+          fixedAmountBdt: z.number().min(0),
+        }),
+        z
+          .object({
+            mode: z.literal("per_product"),
+            perProductBdt: z.number().min(0).optional(),
+            perCustomisedProductBdt: z.number().min(0).optional(),
+          })
+          .refine(
+            (v) => v.perProductBdt != null || v.perCustomisedProductBdt != null,
+            { message: "Set at least one of perProductBdt / perCustomisedProductBdt." },
+          ),
+      ])
+      .optional(),
     sslcommerz: z
       .object({
         storeId: z.string(),
@@ -92,6 +123,14 @@ export const tenantSettingsSchema = z
           description: z.string().max(300).optional(),
           enabled: z.boolean().optional(),
           free: z.boolean().optional(),
+          /**
+           * Match aliases the AI agent uses to find this add-on.
+           * Example: ["official font", "premium font", "heat press"] for an "Official Font" add-on.
+           * Comma- or pipe-separated entries are also tolerated; the portal UI splits on commas.
+           */
+          aliases: z.array(z.string().min(1).max(60)).max(20).optional(),
+          /** Optional grouping like "customization", "premium", "shipping". Used for filtering by the agent. */
+          category: z.string().max(40).optional(),
         }),
       )
       .max(80)
@@ -121,6 +160,16 @@ export const tenantSettingsSchema = z
         }),
       )
       .max(200)
+      .optional(),
+    /**
+     * Phase 1 agent loop opt-in. When enabled=true, inbound text turns are routed
+     * through the LangGraph agent (src/agent) instead of the legacy switchboard.
+     * Image turns and tenants without this flag continue on the legacy path.
+     */
+    agent: z
+      .object({
+        enabled: z.boolean().optional(),
+      })
       .optional(),
     /** Tenant business profile used for invoice branding. */
     businessProfile: z

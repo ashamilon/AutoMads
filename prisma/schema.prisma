@@ -3,9 +3,8 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 enum IntegrationType {
@@ -66,6 +65,9 @@ model Tenant {
   conversations     MessengerConversation[]
   knowledgeExamples KnowledgeExample[]
   scheduledPosts    ScheduledPost[]
+  customerProfiles  CustomerProfile[]
+  followUps         FollowUp[]
+  agentTraces       AgentTrace[]
 }
 
 /// One row per tenant — holds integration mode + JSON config (credentials live here; encrypt at rest in production)
@@ -116,19 +118,19 @@ model MessengerConversation {
 
 /// Per-turn conversation history. Used for context (last N) + as a source for KnowledgeExample.
 model MessengerMessage {
-  id             String                @id @default(cuid())
-  conversationId String
-  conversation   MessengerConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  id                       String                @id @default(cuid())
+  conversationId           String
+  conversation             MessengerConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   /// "user" (customer) or "assistant" (bot/operator)
-  role           String
-  text           String                @db.Text
+  role                     String
+  text                     String                @db.Text
   /// Optional list of image URLs the user attached
-  imageUrls      String[]              @default([])
+  imageUrls                String[]              @default([])
   /// Graph message id for this row (webhook `message.mid` when known)
   facebookMessageId        String?
   /// When the customer used Messenger "reply", the parent message id they replied to
   replyToFacebookMessageId String?
-  createdAt      DateTime              @default(now())
+  createdAt                DateTime              @default(now())
 
   @@index([conversationId, createdAt])
   @@index([conversationId, facebookMessageId])
@@ -160,11 +162,11 @@ model ScheduledPost {
   id            String    @id @default(cuid())
   tenantId      String
   tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  platform      String    // "facebook" | "instagram" | "both"
-  postType      String    // "product_showcase" | "collection" | "story" | "custom"
+  platform      String // "facebook" | "instagram" | "both"
+  postType      String // "product_showcase" | "collection" | "story" | "custom"
   caption       String    @db.Text
-  imageUrls     Json      // string[] from Cloudinary
-  productSkus   Json?     // optional: string[] of linked product SKUs
+  imageUrls     Json // string[] from Cloudinary
+  productSkus   Json? // optional: string[] of linked product SKUs
   scheduledAt   DateTime
   publishedAt   DateTime?
   status        String    @default("scheduled") // "scheduled" | "published" | "failed" | "draft"
@@ -217,4 +219,88 @@ model Order {
   @@index([tenantId])
   @@index([tenantId, messengerPsid])
   @@index([sslcommerzTranId])
+}
+
+/// Per-customer (psid) profile. Stable across conversations and across PSID changes if we later
+/// merge them. The conversation-level pendingDraftJson stays as the in-flight scratchpad; this
+/// is the long-term record (lead score, totals, preferences).
+model CustomerProfile {
+  id                String    @id @default(cuid())
+  tenantId          String
+  tenant            Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  psid              String
+  name              String?
+  phone             String?
+  address           String?
+  /// 0–100; starts at 10 (just-said-hi), bumps on cart adds and orders.
+  leadScore         Int       @default(10)
+  /// Free-form tags ("vip", "argentina-fan", etc.)
+  tags              String[]  @default([])
+  /// Free-form key/value preferences (favourite size, language, etc.)
+  preferences       Json?
+  totalOrders       Int       @default(0)
+  totalSpentBdt     Decimal   @default(0) @db.Decimal(14, 2)
+  firstSeenAt       DateTime  @default(now())
+  lastSeenAt        DateTime  @default(now())
+  /// Optional: when set, the bot pauses for this customer until this timestamp (phase 4).
+  humanHandledUntil DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([tenantId, psid])
+  @@index([tenantId])
+  @@index([tenantId, lastSeenAt])
+}
+
+/// Queued autonomous actions: abandoned-cart nudges, payment-link reminders, post-delivery
+/// review requests, etc. Drained by the post scheduler tick.
+model FollowUp {
+  id             String   @id @default(cuid())
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  psid           String
+  conversationId String?
+  /// "abandoned_cart" | "payment_reminder" | "delivery_review" | "custom"
+  kind           String
+  /// "scheduled" | "sent" | "cancelled" | "failed"
+  status         String   @default("scheduled")
+  runAt          DateTime
+  attempts       Int      @default(0)
+  lastError      String?
+  /// Free-form payload (e.g. cart snapshot, suggested message).
+  payload        Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([status, runAt])
+  @@index([tenantId, psid])
+  @@index([tenantId, kind, status])
+}
+
+/// One row per agent step (router decision + tool result). Used for debugging hallucinations
+/// and for replaying turns in the admin panel.
+model AgentTrace {
+  id             String   @id @default(cuid())
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversationId String
+  psid           String
+  /// Stable per-turn id grouping all steps from one inbound message.
+  turnId         String
+  iter           Int
+  tool           String
+  thought        String?  @db.Text
+  args           Json?
+  ok             Boolean
+  observation    String   @db.Text
+  errorCode      String?
+  llmLatencyMs   Int?
+  toolLatencyMs  Int?
+  /// "terminal" | "max_iter" | "router_error" | null while in-flight
+  finalReason    String?
+  createdAt      DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, conversationId, createdAt])
+  @@index([turnId])
 }

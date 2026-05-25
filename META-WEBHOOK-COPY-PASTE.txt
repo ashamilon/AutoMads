@@ -42,6 +42,6 @@ After Meta verifies:
   GET https://cesarean-karaoke-creme.ngrok-free.dev/health
 
 ================================================================================
-Secrets stay only on your machine: .env (DB, ADMIN_API_KEY, Supabase keys).
+Secrets stay only on your machine: .env (DB password, ADMIN_API_KEY, integration keys).
 Do not commit .env or paste DB passwords into chat or public repos.
 ================================================================================

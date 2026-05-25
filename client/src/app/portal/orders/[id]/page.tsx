@@ -3,7 +3,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Section, Tabs } from "@/components/ui/section";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiOpenBlob } from "@/lib/api";
 import type { OrderRow } from "@/lib/types";
 import { orderStatusTone, paymentTone } from "@/lib/status-styles";
 import { format } from "date-fns";
@@ -37,6 +37,7 @@ export default function OrderDetailPage() {
     subtotalBdt: number;
     deliveryChargeBdt: number;
     grandTotalBdt: number;
+    advanceRequiredBdt: number;
     advancePaidBdt: number;
     dueBdt: number;
     pathaoTrackingId: string | null;
@@ -65,6 +66,7 @@ export default function OrderDetailPage() {
         subtotalBdt: number;
         deliveryChargeBdt: number;
         grandTotalBdt: number;
+        advanceRequiredBdt: number;
         advancePaidBdt: number;
         dueBdt: number;
         pathaoTrackingId: string | null;
@@ -95,6 +97,7 @@ export default function OrderDetailPage() {
         subtotalBdt: number;
         deliveryChargeBdt: number;
         grandTotalBdt: number;
+        advanceRequiredBdt: number;
         advancePaidBdt: number;
         dueBdt: number;
         pathaoTrackingId: string | null;
@@ -295,7 +298,12 @@ export default function OrderDetailPage() {
             <Button
               variant="ghost"
               className="gap-2 text-accent-bright"
-              onClick={() => window.open(`/api/v1/orders/${order.id}/invoice`, "_blank")}
+              onClick={() => {
+                void apiOpenBlob(`/api/v1/orders/${order.id}/invoice`).catch((e: unknown) => {
+                  // Surface the failure so the user isn't left guessing.
+                  alert(e instanceof Error ? e.message : "Could not open invoice");
+                });
+              }}
             >
               <Download className="h-4 w-4" /> Download Invoice
             </Button>
@@ -457,20 +465,25 @@ export default function OrderDetailPage() {
           />
 
           {tab === "overview" && (
-            <Section title="Extracted intent">
-              <dl className="grid gap-3 sm:grid-cols-2">
-                {["name", "product", "size", "quantity", "address", "phone"].map((key) => (
+            <Section title="Order items">
+              <OrderItemsView sd={sd} />
+              <div className="mt-5 space-y-3 border-t border-white/[0.06] pt-4">
+                {[
+                  ["Customer name", sd.name],
+                  ["Phone", sd.phone],
+                  ["Address", sd.address],
+                ].map(([k, v]) => (
                   <div
-                    key={key}
+                    key={String(k)}
                     className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3"
                   >
-                    <dt className="label-caps">{key}</dt>
+                    <dt className="label-caps">{String(k)}</dt>
                     <dd className="mt-1 break-words text-sm font-medium text-slate-200">
-                      {sd[key] != null && sd[key] !== "" ? String(sd[key]) : "—"}
+                      {v != null && v !== "" ? String(v) : "—"}
                     </dd>
                   </div>
                 ))}
-              </dl>
+              </div>
             </Section>
           )}
 
@@ -500,15 +513,34 @@ export default function OrderDetailPage() {
                 <Row label="External order ID" value={order.externalOrderId} onCopy={copy} />
                 <Row label="SSLCommerz tran_id" value={order.sslcommerzTranId} onCopy={copy} />
                 <Row label="Pathao consignment" value={order.pathaoConsignmentId} onCopy={copy} />
-                <Row label="Courier due" value={courier ? `${courier.dueBdt.toFixed(2)} BDT` : null} onCopy={copy} />
                 <Row
-                  label="Courier grand total"
+                  label="Subtotal"
+                  value={courier ? `${courier.subtotalBdt.toFixed(2)} BDT` : null}
+                  onCopy={copy}
+                />
+                <Row
+                  label="Delivery charge"
+                  value={courier ? `${courier.deliveryChargeBdt.toFixed(2)} BDT` : null}
+                  onCopy={copy}
+                />
+                <Row
+                  label="Grand total"
                   value={courier ? `${courier.grandTotalBdt.toFixed(2)} BDT` : null}
+                  onCopy={copy}
+                />
+                <Row
+                  label="Advance required"
+                  value={courier ? `${courier.advanceRequiredBdt.toFixed(2)} BDT` : null}
                   onCopy={copy}
                 />
                 <Row
                   label="Advance paid"
                   value={courier ? `${courier.advancePaidBdt.toFixed(2)} BDT` : null}
+                  onCopy={copy}
+                />
+                <Row
+                  label="Courier due (cash on delivery)"
+                  value={courier ? `${courier.dueBdt.toFixed(2)} BDT` : null}
                   onCopy={copy}
                 />
                 <Row label="Messenger PSID" value={order.messengerPsid} onCopy={copy} />
@@ -634,5 +666,143 @@ function Row({
         )}
       </dd>
     </div>
+  );
+}
+
+
+type OrderItemView = {
+  product: string;
+  size?: string;
+  quantity: number;
+  unitPriceBdt?: number;
+  unitAddOnBdt?: number;
+  addOns: Array<{ id?: string; label?: string; priceBdt?: number; value?: string; free?: boolean }>;
+};
+
+function num(v: unknown): number | undefined {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v.replace(/,/g, ""));
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
+function asAddOn(raw: unknown): OrderItemView["addOns"][number] | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const out: OrderItemView["addOns"][number] = {};
+  if (typeof r.id === "string") out.id = r.id;
+  if (typeof r.label === "string") out.label = r.label;
+  if (typeof r.value === "string") out.value = r.value;
+  const p = num(r.priceBdt);
+  if (p != null) out.priceBdt = p;
+  if (r.free === true) out.free = true;
+  return out;
+}
+
+function readItems(sd: Record<string, unknown>): OrderItemView[] {
+  const raw = sd["items"];
+  if (Array.isArray(raw) && raw.length > 0) {
+    const out: OrderItemView[] = [];
+    for (const x of raw) {
+      if (!x || typeof x !== "object" || Array.isArray(x)) continue;
+      const r = x as Record<string, unknown>;
+      const product = String(r.product ?? "Item").trim();
+      if (!product) continue;
+      const item: OrderItemView = {
+        product,
+        quantity: num(r.quantity) ?? 1,
+        addOns: Array.isArray(r.addOns)
+          ? (r.addOns as unknown[]).map(asAddOn).filter((x): x is OrderItemView["addOns"][number] => x != null)
+          : [],
+      };
+      const size = String(r.size ?? "").trim();
+      if (size) item.size = size;
+      const unit = num(r.unitPriceBdt);
+      if (unit != null) item.unitPriceBdt = unit;
+      const addOnUnit = num(r.unitAddOnBdt);
+      if (addOnUnit != null) item.unitAddOnBdt = addOnUnit;
+      out.push(item);
+    }
+    if (out.length > 0) return out;
+  }
+  // Single-item legacy fallback.
+  const product = String(sd.product ?? "").trim();
+  if (!product) return [];
+  const single: OrderItemView = {
+    product,
+    quantity: num(sd.quantity) ?? 1,
+    addOns: [],
+  };
+  const size = String(sd.size ?? "").trim();
+  if (size) single.size = size;
+  return [single];
+}
+
+function OrderItemsView({ sd }: { sd: Record<string, unknown> }) {
+  const items = readItems(sd);
+  if (items.length === 0) {
+    return (
+      <p className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-sm text-slate-500">
+        No item data on this order.
+      </p>
+    );
+  }
+  return (
+    <ul className="space-y-3">
+      {items.map((it, idx) => {
+        const baseUnit = it.unitPriceBdt ?? 0;
+        const addOnUnit =
+          it.unitAddOnBdt ?? it.addOns.reduce((s, a) => s + (a.priceBdt ?? 0), 0);
+        const lineTotal = (baseUnit + addOnUnit) * it.quantity;
+        return (
+          <li
+            key={`${it.product}-${idx}`}
+            className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3"
+          >
+            <div className="flex flex-wrap items-baseline justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-slate-100">{it.product}</p>
+                <p className="mt-0.5 text-[11px] text-slate-500">
+                  {it.size ? `Size ${it.size} · ` : ""}Qty {it.quantity}
+                  {baseUnit > 0 ? ` · ${baseUnit} BDT/unit` : ""}
+                </p>
+              </div>
+              {lineTotal > 0 && (
+                <span className="font-display text-sm font-bold tabular-figures text-white">
+                  {lineTotal.toLocaleString()} BDT
+                </span>
+              )}
+            </div>
+            {it.addOns.length > 0 && (
+              <ul className="mt-3 space-y-1.5 border-t border-white/[0.04] pt-3 text-xs text-slate-300">
+                {it.addOns.map((a, i) => {
+                  const label = a.label ?? a.id ?? "Add-on";
+                  const value = a.value ? `: "${a.value}"` : "";
+                  const isFree = a.free === true || a.priceBdt === 0;
+                  const pricePart = isFree
+                    ? "FREE"
+                    : a.priceBdt != null
+                      ? `+${a.priceBdt} BDT`
+                      : "";
+                  return (
+                    <li key={`${label}-${i}`} className="flex items-baseline justify-between gap-3">
+                      <span className="text-slate-300">
+                        + {label}
+                        {value}
+                      </span>
+                      {pricePart && (
+                        <span className="font-mono text-[11px] text-slate-400">{pricePart}</span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </li>
+        );
+      })}
+    </ul>
   );
 }

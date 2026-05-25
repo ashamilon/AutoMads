@@ -13,6 +13,7 @@ import {
 } from "../services/cloudinaryCatalogImageSync.js";
 import { confirmManualPayment, scheduleTrackingCheck } from "../services/orderWorkflowService.js";
 import { generateInvoicePdf } from "../services/invoicePdfService.js";
+import { computeAdvanceForCart } from "../agent/advanceResolver.js";
 import { createPathaoOrder, getPathaoOrderStatus, type PathaoTenantConfig } from "../integrations/pathao/pathaoService.js";
 import { logger } from "../utils/logger.js";
 import { z } from "zod";
@@ -64,13 +65,48 @@ export async function getOrder(req: Request, res: Response): Promise<void> {
   }
   const settings = parseTenantSettings(order.tenant.settings);
   const subtotalBdt = Number(order.totalAmount?.toString() ?? "0");
-  const deliveryChargeBdt = typeof settings.deliveryChargeBdt === "number" ? settings.deliveryChargeBdt : 0;
+  const deliveryChargeBdt =
+    typeof settings.deliveryChargeBdt === "number" ? settings.deliveryChargeBdt : 0;
   const grandTotalBdt = subtotalBdt + deliveryChargeBdt;
-  const advancePolicyBdt =
-    typeof settings.advancePaymentBdt === "number" ? settings.advancePaymentBdt : subtotalBdt;
+
+  // Advance resolution priority (matches the agent + invoice paths):
+  //   1. structuredData.advance.totalBdt (per-product breakdown stored at confirm_order time)
+  //   2. settings.advancePolicy (current per-tenant setting, fixed or per_product)
+  //   3. settings.advancePaymentBdt (legacy fixed)
+  //   4. fallback: 0 (NOT the full subtotal — that wildly overstates "advance paid")
+  let advanceRequiredBdt: number | null = null;
+  const sd =
+    order.structuredData && typeof order.structuredData === "object" && !Array.isArray(order.structuredData)
+      ? (order.structuredData as Record<string, unknown>)
+      : {};
+  const sdAdvance =
+    sd["advance"] && typeof sd["advance"] === "object" && !Array.isArray(sd["advance"])
+      ? (sd["advance"] as Record<string, unknown>)
+      : null;
+  if (sdAdvance && typeof sdAdvance["totalBdt"] === "number" && Number.isFinite(sdAdvance["totalBdt"])) {
+    advanceRequiredBdt = sdAdvance["totalBdt"] as number;
+  } else if (settings.advancePolicy) {
+    const items = Array.isArray(sd["items"])
+      ? (sd["items"] as Array<Record<string, unknown>>).map((it) => ({
+          quantity: Number(it["quantity"] ?? 1) || 1,
+          addOns: Array.isArray(it["addOns"]) ? (it["addOns"] as unknown[]) : [],
+        }))
+      : [{ quantity: Number(sd["quantity"] ?? 1) || 1, addOns: [] }];
+    advanceRequiredBdt = computeAdvanceForCart({ tenantSettings: settings, cart: items }).totalBdt;
+  } else if (typeof settings.advancePaymentBdt === "number") {
+    advanceRequiredBdt = settings.advancePaymentBdt;
+  } else {
+    advanceRequiredBdt = 0;
+  }
+
+  // What the customer has actually paid so far:
+  //   - PAID    → assume the configured advance was paid before delivery
+  //   - INITIATED (customer claimed but admin hasn't confirmed) → not paid yet
+  //   - anything else → 0
   const advancePaidBdt =
-    order.paymentStatus === "PAID" ? Math.min(advancePolicyBdt, grandTotalBdt) : 0;
+    order.paymentStatus === "PAID" ? Math.min(advanceRequiredBdt, grandTotalBdt) : 0;
   const dueBdt = Math.max(grandTotalBdt - advancePaidBdt, 0);
+
   const pathaoTrackingId = order.pathaoConsignmentId ?? null;
   const pathaoTrackingUrl = pathaoTrackingId
     ? `https://merchant.pathao.com/tracking?consignment_id=${encodeURIComponent(pathaoTrackingId)}`
@@ -83,6 +119,7 @@ export async function getOrder(req: Request, res: Response): Promise<void> {
       subtotalBdt,
       deliveryChargeBdt,
       grandTotalBdt,
+      advanceRequiredBdt,
       advancePaidBdt,
       dueBdt,
       pathaoTrackingId,
@@ -102,28 +139,64 @@ export async function getOrderInvoice(req: Request, res: Response): Promise<void
     res.status(404).json({ error: "not_found" });
     return;
   }
+
+  let filePath: string | null = null;
+
+  // Already-stored invoice URL is from a remote/different host (e.g. Cloudinary). Redirect.
+  // Note: this only works when the client opens the response directly (not via fetch).
   if (order.invoiceUrl) {
-    res.redirect(order.invoiceUrl);
-    return;
+    try {
+      const u = new URL(order.invoiceUrl);
+      if (u.host !== new URL(config.publicBaseUrl).host) {
+        res.redirect(order.invoiceUrl);
+        return;
+      }
+    } catch {
+      // ignore: malformed URL → regenerate
+    }
   }
-  const settings = parseTenantSettings(order.tenant.settings);
-  const structured = order.structuredData as Record<string, unknown>;
-  try {
-    const invoice = await generateInvoicePdf({
-      orderId: order.id,
-      amountBdt: Number(order.totalAmount?.toString() ?? "0"),
-      currency: order.currency,
-      paymentMethod: order.paymentMethod,
-      structured: structured as any,
-      settings,
-      paid: order.paymentStatus === "PAID",
-    });
-    await prisma.order.update({ where: { id: order.id }, data: { invoiceUrl: invoice.publicUrl } });
-    res.redirect(invoice.publicUrl);
-  } catch (e) {
-    logger.error({ e, orderId: order.id }, "Invoice generation failed");
-    res.status(500).json({ error: "invoice_generation_failed" });
+
+  // We always regenerate the local PDF rather than reuse a cached file. Invoices are cheap to
+  // render, and regenerating ensures formatting fixes (e.g. structured add-on lines, advance
+  // breakdowns) and tenant-settings edits are reflected on the next download.
+  if (!filePath) {
+    const settings = parseTenantSettings(order.tenant.settings);
+    const structured = order.structuredData as Record<string, unknown>;
+    try {
+      const invoice = await generateInvoicePdf({
+        orderId: order.id,
+        amountBdt: Number(order.totalAmount?.toString() ?? "0"),
+        currency: order.currency,
+        paymentMethod: order.paymentMethod,
+        structured: structured as any,
+        settings,
+        paid: order.paymentStatus === "PAID",
+      });
+      await prisma.order
+        .update({ where: { id: order.id }, data: { invoiceUrl: invoice.publicUrl } })
+        .catch(() => undefined);
+      filePath = invoice.filePath;
+    } catch (e) {
+      logger.error({ e, orderId: order.id }, "Invoice generation failed");
+      res.status(500).json({ error: "invoice_generation_failed" });
+      return;
+    }
   }
+
+  // Stream the PDF directly so the client (which may have called via authenticated fetch)
+  // doesn't have to follow a 30x redirect to a static asset that lacks auth context.
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename="invoice-${order.id.slice(0, 12)}.pdf"`,
+  );
+  res.setHeader("Cache-Control", "private, max-age=60");
+  fs.createReadStream(filePath)
+    .on("error", (err) => {
+      logger.error({ err, orderId: order.id, filePath }, "Invoice stream failed");
+      if (!res.headersSent) res.status(500).json({ error: "invoice_stream_failed" });
+    })
+    .pipe(res);
 }
 
 const productMappingBody = z.object({
@@ -760,11 +833,22 @@ export async function publishScheduledPostNow(req: Request, res: Response): Prom
   const id = req.params.id as string;
   const existing = await prisma.scheduledPost.findFirst({ where: { id, tenantId: t.id } });
   if (!existing) { res.status(404).json({ error: "not_found" }); return; }
-  if (existing.status === "published") { res.status(400).json({ error: "already_published" }); return; }
+  if (existing.status === "published" && existing.fbPostId) {
+    res.status(400).json({ error: "already_published" });
+    return;
+  }
 
   try {
     await doPublish(id);
     const refreshed = await prisma.scheduledPost.findUnique({ where: { id } });
+    if (refreshed?.status === "failed") {
+      res.status(422).json({
+        error: "publish_failed",
+        failureReason: refreshed.failureReason,
+        post: refreshed,
+      });
+      return;
+    }
     res.json(refreshed);
   } catch (e) {
     res.status(500).json({ error: "publish_failed", detail: String(e) });

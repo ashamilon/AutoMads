@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { Section } from "@/components/ui/section";
 import { useTenant } from "@/context/tenant-context";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   Calendar,
@@ -126,8 +126,22 @@ export default function ContentCalendarPage() {
 
   const handlePublishNow = async (id: string) => {
     if (!confirm("Publish this post now?")) return;
-    await apiFetch(`/api/v1/scheduled-posts/${id}/publish-now`, { method: "POST" });
-    load();
+    try {
+      await apiFetch<ScheduledPost>(`/api/v1/scheduled-posts/${id}/publish-now`, { method: "POST" });
+      load();
+    } catch (e) {
+      if (e instanceof ApiError) {
+        try {
+          const body = JSON.parse(e.body) as { failureReason?: string; post?: ScheduledPost };
+          alert(body.failureReason ?? e.message);
+        } catch {
+          alert(e.message);
+        }
+      } else {
+        alert(String(e));
+      }
+      load();
+    }
   };
 
   return (
@@ -252,15 +266,15 @@ export default function ContentCalendarPage() {
                       <span className={cn("w-1.5 h-1.5 rounded-full", style.dot)} />
                       {p.status}
                     </span>
-                    {p.status !== "published" && (
-                      <button
-                        onClick={() => handlePublishNow(p.id)}
-                        className="p-2 text-indigo-400 hover:bg-indigo-500/10 rounded-lg transition"
-                        title="Publish now"
-                      >
-                        <Send size={14} />
-                      </button>
-                    )}
+                  {(p.status !== "published" || !p.fbPostId) && (
+                    <button
+                      onClick={() => handlePublishNow(p.id)}
+                      className="p-2 text-indigo-400 hover:bg-indigo-500/10 rounded-lg transition"
+                      title="Publish now"
+                    >
+                      <Send size={14} />
+                    </button>
+                  )}
                     <button
                       onClick={() => handleDelete(p.id)}
                       className="p-2 text-red-400 hover:bg-red-500/10 rounded-lg transition"

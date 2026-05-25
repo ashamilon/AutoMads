@@ -3,10 +3,10 @@ import { PrismaClient } from "@prisma/client";
 const globalForPrisma = globalThis as unknown as { prisma: PrismaClient | undefined };
 
 /**
- * Hosted Postgres (Supabase pooled, etc.) sometimes exposes connection_limit=1 — parallel Prisma calls
- * in one request can then throw P2024 "Timed out fetching a new connection". Mitigations: serialize
- * hot paths (see speak()), append `?connection_limit=5&pool_timeout=30` to DATABASE_URL where allowed,
- * or use Supabase Session pooler mode + higher limits.
+ * Local PostgreSQL gives you plenty of connections by default. If you ever swap in a hosted/pooled
+ * Postgres that caps connection_limit (e.g. 1), parallel Prisma calls in one request can throw
+ * P2024 "Timed out fetching a new connection". Mitigations then: serialize hot paths (see speak())
+ * or append `?connection_limit=5&pool_timeout=30` to DATABASE_URL.
  */
 export const prisma =
   globalForPrisma.prisma ??

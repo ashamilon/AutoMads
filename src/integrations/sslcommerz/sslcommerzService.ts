@@ -46,6 +46,15 @@ export async function initiatePaymentSession(input: InitPaymentInput): Promise<{
   if (!storeId || !storePassword) throw new Error("SSLCommerz store credentials not configured");
   const live = isLiveMode(input.isLive);
 
+  // SSLCommerz live gateway often returns HTTP 500 on the GatewayPageURL when the request payload
+  // contains values that pass init validation but break the gateway page renderer. Two known
+  // offenders: an unroutable email domain (e.g. `.local`) and a phone that isn't a real BD mobile.
+  // We sanitise here so every caller benefits.
+  const safeEmail = sanitizeCustomerEmail(input.customerEmail, storeId);
+  const safePhone = sanitizeCustomerPhone(input.customerPhone);
+  const safeAddress = (input.customerAddress?.trim() || "Dhaka").slice(0, 200);
+  const safeName = (input.customerName?.trim() || "Customer").slice(0, 100);
+
   const body = new URLSearchParams({
     store_id: storeId,
     store_passwd: storePassword,
@@ -57,24 +66,48 @@ export async function initiatePaymentSession(input: InitPaymentInput): Promise<{
     cancel_url: input.cancelUrl,
     ipn_url: input.ipnUrl,
     product_category: "general",
-    cus_name: input.customerName,
-    cus_email: input.customerEmail,
-    cus_phone: input.customerPhone,
-    cus_add1: input.customerAddress ?? "Dhaka",
-    shipping_method: "Courier",
+    cus_name: safeName,
+    cus_email: safeEmail,
+    cus_phone: safePhone,
+    cus_add1: safeAddress,
+    cus_city: "Dhaka",
+    cus_country: "Bangladesh",
+    shipping_method: "NO",
     product_name: "Order",
     product_profile: "general",
+    num_of_item: "1",
   });
 
   const res = await axios.post(initUrl(live), body.toString(), {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     timeout: 30_000,
+    validateStatus: () => true,
   });
-  const data = res.data as { status?: string; GatewayPageURL?: string; failedreason?: string };
+  const data = res.data as {
+    status?: string;
+    GatewayPageURL?: string;
+    failedreason?: string;
+    sessionkey?: string;
+  };
   if (data.status !== "SUCCESS" || !data.GatewayPageURL) {
-    logger.error({ data }, "SSLCommerz session init failed");
-    throw new Error(data.failedreason ?? "SSLCommerz init failed");
+    logger.error(
+      {
+        httpStatus: res.status,
+        sslStatus: data.status ?? "unknown",
+        failedReason: data.failedreason ?? null,
+        live,
+        storeId: storeId.slice(0, 4) + "…",
+        tranId: input.tranId,
+        amount: input.totalAmount,
+      },
+      "SSLCommerz session init failed — check storeId/password match the live/sandbox mode",
+    );
+    throw new Error(data.failedreason ?? `SSLCommerz init failed (status=${data.status ?? "unknown"})`);
   }
+  logger.info(
+    { live, tranId: input.tranId, sessionKey: data.sessionkey ?? null },
+    "SSLCommerz session created",
+  );
   return { gatewayUrl: data.GatewayPageURL };
 }
 
@@ -127,4 +160,38 @@ export function verifyIpnSignature(body: Record<string, string>, receivedSign?: 
   concat += "verify_secret=" + storePass;
   const expected = crypto.createHash("md5").update(concat).digest("hex");
   return expected === receivedSign;
+}
+
+
+/**
+ * Coerce any caller-supplied email into something the SSLCommerz live gateway will accept.
+ *
+ * Live SSLCommerz validates email syntax AND domain on the gateway page (not init), and reserved
+ * TLDs like `.local`, `.internal`, `.invalid`, `.test`, `.example` cause HTTP 500 when the page
+ * tries to render the receipt. Real shops generally don't have customer emails for Messenger
+ * orders, so we synthesise a safe placeholder using the merchant's store id as the local part.
+ */
+function sanitizeCustomerEmail(raw: string | undefined, storeId: string): string {
+  const candidate = (raw ?? "").trim().toLowerCase();
+  const reserved = /\.(local|internal|invalid|test|example|home|lan)$/i;
+  const looksValid = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(candidate);
+  if (looksValid && !reserved.test(candidate)) return candidate.slice(0, 120);
+  // Fallback: a routable example.com address keyed to the store. SSL accepts these on live;
+  // they won't bounce because we never receive mail at this address.
+  const slug = storeId.replace(/[^a-z0-9]/gi, "").toLowerCase().slice(0, 24) || "shop";
+  return `customer+${slug}@example.com`;
+}
+
+/**
+ * Reduce any phone string to a clean Bangladesh mobile in `01XXXXXXXXX` form when possible,
+ * otherwise return a benign placeholder. Live SSL rejects `"000"` and other obviously fake values.
+ */
+function sanitizeCustomerPhone(raw: string | undefined): string {
+  const cleaned = (raw ?? "").replace(/[\s\-+]/g, "");
+  // Strip a leading 880 country code so we end up with the 11-digit mobile form SSL prefers.
+  const m11 = /(?:^|^880|^\+880)(01\d{9})$/.exec(cleaned);
+  if (m11) return m11[1]!;
+  if (/^01\d{9}$/.test(cleaned)) return cleaned;
+  // Fallback to a syntactically-valid placeholder so the gateway page renders. SSL doesn't OTP this.
+  return "01700000000";
 }

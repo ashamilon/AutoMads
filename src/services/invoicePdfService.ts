@@ -260,44 +260,71 @@ export async function generateInvoicePdf(
     const rowY = cardsY + 30 + idx * 16;
     doc.font("Helvetica").fillColor("#475569").text(k, infoCardX + 16, rowY, {
       width: 90,
+      lineBreak: false,
     });
+    // Truncate long values (e.g. cuid order ids) so they never wrap into the next detail row.
+    const displayValue = String(v);
+    const valueWidth = cardWidth - 124;
     doc
       .font("Helvetica-Bold")
       .fillColor(k === "Status" ? (input.paid ? "#15803d" : "#b45309") : "#0f172a")
-      .text(v, infoCardX + 110, rowY, { width: cardWidth - 124, align: "right" });
+      .text(displayValue, infoCardX + 110, rowY, {
+        width: valueWidth,
+        align: "right",
+        lineBreak: false,
+        ellipsis: true,
+      });
   });
 
   // ---------- Itemized table ----------
   const tableTop = cardsY + cardHeight + 26;
   const tableHeaderH = 30;
-  const colItem = left + 14;
-  const colSizeX = left + 304;
-  const colQtyX = left + 380;
-  const colUnitX = left + 432;
-  const colTotalX = right - 100;
+  // Right-anchored column geometry so AMOUNT/UNIT never collide regardless of page width.
+  // Layout: ITEM (flex) | SIZE 56 | QTY 44 | UNIT 84 | AMOUNT 100  (totals match contentWidth)
+  const colPad = 14;
+  const sizeColW = 56;
+  const qtyColW = 44;
+  const unitColW = 84;
+  const amountColW = 100;
+  const colAmountRight = right - colPad;
+  const colUnitRight = colAmountRight - amountColW - 8;
+  const colQtyRight = colUnitRight - unitColW - 6;
+  const colSizeRight = colQtyRight - qtyColW - 6;
+  const colItem = left + colPad;
+  const itemColW = colSizeRight - sizeColW - colItem - 6;
+  // x-positions where each right-aligned column STARTS:
+  const colSizeX = colSizeRight - sizeColW;
+  const colQtyX = colQtyRight - qtyColW;
+  const colUnitX = colUnitRight - unitColW;
+  const colTotalX = colAmountRight - amountColW;
 
   doc.save();
   doc.roundedRect(left, tableTop, contentWidth, tableHeaderH, 6).fill(brand);
   doc.restore();
-
   doc
-    .fillColor(brandText)
+    .fillColor("#ffffff")
     .font("Helvetica-Bold")
     .fontSize(10)
-    .text("ITEM", colItem, tableTop + 10, { width: 280 });
-  doc.text("SIZE", colSizeX, tableTop + 10, { width: 60, align: "center" });
-  doc.text("QTY", colQtyX, tableTop + 10, { width: 40, align: "center" });
-  doc.text("UNIT", colUnitX - 4, tableTop + 10, { width: 80, align: "right" });
-  doc.text("AMOUNT", colTotalX - 4, tableTop + 10, { width: 96, align: "right" });
+    .text("ITEM", colItem, tableTop + 10, { width: itemColW, lineBreak: false });
+  doc.text("SIZE", colSizeX, tableTop + 10, { width: sizeColW, align: "center", lineBreak: false });
+  doc.text("QTY", colQtyX, tableTop + 10, { width: qtyColW, align: "center", lineBreak: false });
+  doc.text("UNIT", colUnitX, tableTop + 10, { width: unitColW, align: "right", lineBreak: false });
+  doc.text("AMOUNT", colTotalX, tableTop + 10, {
+    width: amountColW,
+    align: "right",
+    lineBreak: false,
+  });
 
   const itemsArr = Array.isArray(s.items) ? s.items.filter((x) => String(x?.product ?? "").trim()) : [];
-  const rows: Array<{
-    label: string;
+  type Row = {
+    product: string;
+    addOnLines: string[];
     size: string;
     qty: number;
     unit: number;
     total: number;
-  }> = [];
+  };
+  const rows: Row[] = [];
 
   if (itemsArr.length > 0) {
     let allocated = 0;
@@ -309,14 +336,18 @@ export async function generateInvoicePdf(
       const unitTotal = unitBase + unitAddon;
       const lineTotal = unitTotal > 0 ? unitTotal * qty : 0;
       allocated += lineTotal;
-      const addOnLabels = Array.isArray(it.addOns) ? it.addOns.filter(Boolean) : [];
-      const label =
-        String(it.product ?? "Product") + (addOnLabels.length > 0 ? ` (${addOnLabels.join(", ")})` : "");
+      const addOnLines = formatAddOnLines(it.addOns);
       rows.push({
-        label,
+        product: String(it.product ?? "Product"),
+        addOnLines,
         size: String(it.size ?? s.size ?? "-"),
         qty,
-        unit: unitTotal > 0 ? unitTotal : input.amountBdt / Math.max(1, itemsArr.reduce((n, x) => n + Math.max(1, Number(x?.quantity ?? 1) || 1), 0)),
+        // UNIT column shows the base product price; add-ons are listed separately so the customer
+        // can see what they actually paid for each option.
+        unit:
+          unitBase > 0
+            ? unitBase
+            : input.amountBdt / Math.max(1, itemsArr.reduce((n, x) => n + Math.max(1, Number(x?.quantity ?? 1) || 1), 0)),
         total: lineTotal > 0 ? lineTotal : 0,
       });
     }
@@ -333,7 +364,8 @@ export async function generateInvoicePdf(
     const subtotalVal = input.amountBdt;
     const unitAmount = subtotalVal / quantity;
     rows.push({
-      label: String(s.product ?? "Product"),
+      product: String(s.product ?? "Product"),
+      addOnLines: [],
       size: String(s.size ?? "-"),
       qty: quantity,
       unit: unitAmount,
@@ -343,27 +375,47 @@ export async function generateInvoicePdf(
   const subtotal = input.amountBdt;
 
   let cursorY = tableTop + tableHeaderH;
-  const rowH = 36;
+  const baseRowH = 36;
+  const addonLineH = 13;
   rows.forEach((row, i) => {
+    const rowH = baseRowH + (row.addOnLines.length > 0 ? row.addOnLines.length * addonLineH + 4 : 0);
     const zebra = i % 2 === 0 ? "#ffffff" : "#f8fafc";
     doc.save();
     doc.rect(left, cursorY, contentWidth, rowH).fill(zebra);
     doc.restore();
 
     doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(10.5);
-    doc.text(row.label, colItem, cursorY + 9, { width: 280 });
+    doc.text(row.product, colItem, cursorY + 9, { width: itemColW, lineBreak: false, ellipsis: true });
     doc.font("Helvetica").fontSize(9.5).fillColor("#64748b");
-    doc.text("Sold by " + businessName, colItem, cursorY + 22, { width: 280 });
+    doc.text("Sold by " + businessName, colItem, cursorY + 22, {
+      width: itemColW,
+      lineBreak: false,
+      ellipsis: true,
+    });
+
+    if (row.addOnLines.length > 0) {
+      let lineY = cursorY + baseRowH;
+      doc.font("Helvetica").fontSize(9).fillColor("#475569");
+      for (const addOn of row.addOnLines) {
+        doc.text(addOn, colItem + 6, lineY, { width: itemColW - 6, lineBreak: false, ellipsis: true });
+        lineY += addonLineH;
+      }
+    }
 
     doc.fillColor("#0f172a").font("Helvetica").fontSize(10);
-    doc.text(row.size, colSizeX, cursorY + 13, { width: 60, align: "center" });
-    doc.text(String(row.qty), colQtyX, cursorY + 13, { width: 40, align: "center" });
-    doc.text(formatCurrency(row.unit), colUnitX - 4, cursorY + 13, { width: 80, align: "right" });
+    doc.text(row.size, colSizeX, cursorY + 13, { width: sizeColW, align: "center", lineBreak: false });
+    doc.text(String(row.qty), colQtyX, cursorY + 13, { width: qtyColW, align: "center", lineBreak: false });
+    doc.text(formatCurrency(row.unit), colUnitX, cursorY + 13, {
+      width: unitColW,
+      align: "right",
+      lineBreak: false,
+    });
     doc
       .font("Helvetica-Bold")
-      .text(formatCurrency(row.total), colTotalX - 4, cursorY + 13, {
-        width: 96,
+      .text(formatCurrency(row.total), colTotalX, cursorY + 13, {
+        width: amountColW,
         align: "right",
+        lineBreak: false,
       });
 
     cursorY += rowH;
@@ -385,12 +437,36 @@ export async function generateInvoicePdf(
   const deliveryCharge =
     typeof input.settings.deliveryChargeBdt === "number" ? input.settings.deliveryChargeBdt : 0;
   const grandTotal = subtotal + deliveryCharge;
+
+  // Advance is honoured in this priority order:
+  //   1. structuredData.advance.totalBdt (per-product breakdown stored at confirm time)
+  //   2. settings.advancePaymentBdt (legacy fixed)
+  //   3. structuredData.advancePaymentBdt (one-shot override)
+  // When `paid=true` (post-payment-pipeline), we treat the whole grand total as paid.
+  const sdAdvanceObj =
+    s && (s as Record<string, unknown>)["advance"] && typeof (s as Record<string, unknown>)["advance"] === "object"
+      ? ((s as Record<string, unknown>)["advance"] as Record<string, unknown>)
+      : null;
+  const sdAdvanceTotal =
+    sdAdvanceObj && typeof sdAdvanceObj["totalBdt"] === "number"
+      ? (sdAdvanceObj["totalBdt"] as number)
+      : null;
+  const legacyOverride =
+    s && typeof (s as Record<string, unknown>)["advancePaymentBdt"] === "number"
+      ? ((s as Record<string, unknown>)["advancePaymentBdt"] as number)
+      : null;
+  const advanceFromTenant =
+    typeof input.settings.advancePaymentBdt === "number" ? input.settings.advancePaymentBdt : null;
+
+  const baseAdvance =
+    sdAdvanceTotal ?? legacyOverride ?? advanceFromTenant ?? null;
+
   const advancePaid =
-    typeof input.settings.advancePaymentBdt === "number"
-      ? Math.min(input.settings.advancePaymentBdt, grandTotal)
+    baseAdvance != null
+      ? Math.min(baseAdvance, grandTotal)
       : input.paid
-      ? grandTotal
-      : 0;
+        ? grandTotal
+        : 0;
   const due = Math.max(grandTotal - advancePaid, 0);
 
   // QR code (left of totals)
@@ -458,23 +534,26 @@ export async function generateInvoicePdf(
   writeTotal(due > 0 ? "Balance Due" : "Total", due > 0 ? due : grandTotal, 3, { emphasis: true });
 
   // ---------- PAID stamp ----------
+  // Place under the QR code (left margin) so it never overlaps the totals column on the right.
   if (input.paid) {
+    const stampW = 140;
+    const stampH = 60;
     doc.save();
-    const stampX = left + 220;
-    const stampY = totalsY + 12;
+    const stampX = left + 14;
+    const stampY = totalsY + 138; // below the QR card (which ends ~138 pt below totalsY)
     doc.translate(stampX, stampY).rotate(-14);
-    doc.lineWidth(2.5).strokeColor("#15803d").roundedRect(0, 0, 130, 56, 6).stroke();
-    doc.lineWidth(1.2).strokeColor("#15803d").roundedRect(4, 4, 122, 48, 4).stroke();
+    doc.lineWidth(2.5).strokeColor("#15803d").roundedRect(0, 0, stampW, stampH, 6).stroke();
+    doc.lineWidth(1.2).strokeColor("#15803d").roundedRect(4, 4, stampW - 8, stampH - 8, 4).stroke();
     doc
       .fillColor("#15803d")
       .font("Helvetica-Bold")
-      .fontSize(26)
-      .text("PAID", 0, 14, { width: 130, align: "center" });
+      .fontSize(28)
+      .text("PAID", 0, 14, { width: stampW, align: "center", lineBreak: false });
     doc.font("Helvetica").fontSize(8).fillColor("#15803d").text(
       issuedAt.toLocaleDateString(),
       0,
-      40,
-      { width: 130, align: "center" },
+      44,
+      { width: stampW, align: "center", lineBreak: false },
     );
     doc.restore();
   }
@@ -533,4 +612,51 @@ export async function generateInvoicePdf(
     filePath,
     publicUrl: `${publicBase}/invoices/${encodeURIComponent(fileName)}`,
   };
+}
+
+
+/**
+ * Map a previously-generated invoice publicUrl back to its local file path on disk.
+ * Returns null when the URL is from a different host (e.g. Cloudinary) or the file is missing.
+ */
+export function resolveInvoiceFilePathFromUrl(publicUrl: string | null | undefined): string | null {
+  return resolveLocalAssetPath(publicUrl ?? undefined);
+}
+
+
+/**
+ * Render add-ons on a cart line as separate text lines below the product name.
+ * Accepts the rich shape (object with id/label/priceBdt/value) used by the agent loop, and
+ * also tolerates legacy strings.
+ */
+function formatAddOnLines(addOns: unknown): string[] {
+  if (!Array.isArray(addOns)) return [];
+  const out: string[] = [];
+  for (const a of addOns) {
+    if (!a) continue;
+    if (typeof a === "string") {
+      const t = a.trim();
+      if (t) out.push(`+ ${t}`);
+      continue;
+    }
+    if (typeof a !== "object" || Array.isArray(a)) continue;
+    const r = a as Record<string, unknown>;
+    const label = String(r["label"] ?? r["id"] ?? "Add-on").trim();
+    if (!label) continue;
+    const value = String(r["value"] ?? "").trim();
+    const priceRaw = r["priceBdt"];
+    const isFreeFlag = r["free"] === true;
+    let pricePart = "";
+    if (typeof priceRaw === "number" && Number.isFinite(priceRaw)) {
+      pricePart = priceRaw === 0 || isFreeFlag ? " — FREE" : ` (+${priceRaw} BDT)`;
+    } else if (typeof priceRaw === "string" && priceRaw.trim() !== "") {
+      const n = Number(priceRaw.replace(/,/g, ""));
+      if (Number.isFinite(n)) pricePart = n === 0 ? " — FREE" : ` (+${n} BDT)`;
+    } else if (isFreeFlag) {
+      pricePart = " — FREE";
+    }
+    const valuePart = value ? `: "${value}"` : "";
+    out.push(`+ ${label}${valuePart}${pricePart}`);
+  }
+  return out;
 }

@@ -17,3 +17,7 @@ inbox/
 all_messages/
 *.sqlite
 *.db
+# Diagnostic dumps (contain customer PSIDs, phone numbers, addresses)
+.tmp/
+# Generated PDF invoices (contain real customer data)
+public/invoices/

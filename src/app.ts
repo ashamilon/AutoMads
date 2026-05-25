@@ -11,6 +11,7 @@ import { facebookRoutes } from "./routes/facebookRoutes.js";
 import { sslcommerzRoutes } from "./routes/sslcommerzRoutes.js";
 import { clientRoutes } from "./routes/clientRoutes.js";
 import { tenantPortalRoutes } from "./routes/tenantPortalRoutes.js";
+import { agentDebugRoutes } from "./routes/agentDebugRoutes.js";
 import { telegramRoutes } from "./routes/telegramRoutes.js";
 import { serveMessengerCatalogImage } from "./controllers/catalogMessengerImageController.js";
 
@@ -62,7 +63,7 @@ export function createApp(): express.Application {
     res.json({ ok: true, service: "facebook-order-automation-saas" });
   });
 
-  /** Relay catalog images so Meta can attach them when Supabase/other CDNs reject Facebook fetchers */
+  /** Relay catalog images so Meta can attach them when upstream CDNs reject Facebook fetchers */
   app.get("/public/messenger-catalog-image", serveMessengerCatalogImage);
 
   app.use(express.static(path.join(process.cwd(), "public")));
@@ -73,6 +74,11 @@ export function createApp(): express.Application {
     res.redirect("/admin/index.html");
   });
 
+  // Developer debug endpoint (task 11.1). Mounted BEFORE `/admin` so the admin-key
+  // middleware on `adminRoutes` doesn't intercept tenant-key requests to
+  // `/admin/snapshot/...`. Auth is handled inside the sub-router via
+  // `requireTenantApiKey`, mirroring `tenantPortalRoutes.ts`.
+  app.use("/admin/snapshot", agentDebugRoutes);
   app.use("/admin", adminRoutes);
   app.use("/webhooks/facebook", facebookRoutes);
   app.use("/webhooks/sslcommerz", sslcommerzRoutes);

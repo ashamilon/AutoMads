@@ -53,6 +53,10 @@ type AddOn = {
   description?: string;
   enabled?: boolean;
   free?: boolean;
+  /** Match aliases the AI agent uses when customers ask in different words. */
+  aliases?: string[];
+  /** Optional grouping like "customization", "premium", "shipping". */
+  category?: string;
 };
 
 type ManualPaymentAdminLog = {
@@ -114,7 +118,16 @@ const PRESET = {
 type SettingsShape = {
   defaultOrderAmountBdt?: number;
   deliveryChargeBdt?: number;
+  /** Legacy fixed advance amount; the new advancePolicy supersedes this when set. */
   advancePaymentBdt?: number;
+  /**
+   * Structured advance policy.
+   *  - mode="fixed": one amount per order regardless of cart size.
+   *  - mode="per_product": perProductBdt × plain quantity + perCustomisedProductBdt × customised quantity.
+   */
+  advancePolicy?:
+    | { mode: "fixed"; fixedAmountBdt: number }
+    | { mode: "per_product"; perProductBdt?: number; perCustomisedProductBdt?: number };
   businessProfile?: {
     name?: string;
     logoUrl?: string;
@@ -593,20 +606,21 @@ export default function SettingsPage() {
                 className={inputCls}
               />
             </Field>
-            <Field
-              label="Advance to collect (BDT)"
-              hint="How much advance must be paid before confirming/importing the order."
-            >
-              <input
-                type="number"
-                value={settings.advancePaymentBdt ?? ""}
-                onChange={(e) =>
-                  update("advancePaymentBdt", e.target.value === "" ? undefined : Number(e.target.value))
-                }
-                placeholder="200"
-                className={inputCls}
-              />
-            </Field>
+            <AdvancePolicyEditor
+              value={settings.advancePolicy}
+              legacyFixed={settings.advancePaymentBdt}
+              onChange={(next, legacy) => {
+                setSettings((prev) => {
+                  const merged: SettingsShape = { ...prev };
+                  if (next === undefined) delete merged.advancePolicy;
+                  else merged.advancePolicy = next;
+                  if (legacy === undefined) delete merged.advancePaymentBdt;
+                  else merged.advancePaymentBdt = legacy;
+                  setJson(JSON.stringify(merged, null, 2));
+                  return merged;
+                });
+              }}
+            />
             <Field label="Business name (for invoice PDF)">
               <input
                 value={settings.businessProfile?.name ?? ""}
@@ -921,6 +935,46 @@ export default function SettingsPage() {
                             )
                           }
                           placeholder="Any player name + number in premium heat-press font"
+                          className={inputCls}
+                        />
+                      </Field>
+                    </div>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <Field
+                        label="Aliases (comma-separated — what the AI agent matches against)"
+                      >
+                        <input
+                          value={(a.aliases ?? []).join(", ")}
+                          onChange={(e) =>
+                            updateAddOns((prev) =>
+                              prev.map((x, i) =>
+                                i === idx
+                                  ? {
+                                      ...x,
+                                      aliases: e.target.value
+                                        .split(",")
+                                        .map((s) => s.trim())
+                                        .filter(Boolean),
+                                    }
+                                  : x,
+                              ),
+                            )
+                          }
+                          placeholder="official font, premium font, heat press"
+                          className={inputCls}
+                        />
+                      </Field>
+                      <Field label="Category (optional)">
+                        <input
+                          value={a.category ?? ""}
+                          onChange={(e) =>
+                            updateAddOns((prev) =>
+                              prev.map((x, i) =>
+                                i === idx ? { ...x, category: e.target.value } : x,
+                              ),
+                            )
+                          }
+                          placeholder="customization | premium | shipping"
                           className={inputCls}
                         />
                       </Field>
@@ -2139,5 +2193,174 @@ function SocialAccountsSection({
         </div>
       </Section>
     </>
+  );
+}
+
+
+type AdvancePolicy = NonNullable<SettingsShape["advancePolicy"]>;
+type AdvanceMode = AdvancePolicy["mode"] | "off";
+
+function AdvancePolicyEditor({
+  value,
+  legacyFixed,
+  onChange,
+}: {
+  value: SettingsShape["advancePolicy"];
+  legacyFixed: number | undefined;
+  onChange: (next: SettingsShape["advancePolicy"], legacyFixed: number | undefined) => void;
+}) {
+  // Resolve initial mode: explicit policy → that mode; else legacy fixed → "fixed"; else "off".
+  const currentMode: AdvanceMode = value
+    ? value.mode
+    : legacyFixed != null
+      ? "fixed"
+      : "off";
+
+  const fixedAmount =
+    value?.mode === "fixed"
+      ? value.fixedAmountBdt
+      : legacyFixed != null
+        ? legacyFixed
+        : undefined;
+
+  const perPlain = value?.mode === "per_product" ? value.perProductBdt : undefined;
+  const perCust = value?.mode === "per_product" ? value.perCustomisedProductBdt : undefined;
+
+  function switchMode(next: AdvanceMode) {
+    if (next === "off") {
+      onChange(undefined, undefined);
+      return;
+    }
+    if (next === "fixed") {
+      const amt = fixedAmount ?? 0;
+      onChange({ mode: "fixed", fixedAmountBdt: amt }, undefined);
+      return;
+    }
+    // per_product: keep any prior per-product values, default empty.
+    onChange(
+      {
+        mode: "per_product",
+        ...(perPlain != null ? { perProductBdt: perPlain } : {}),
+        ...(perCust != null ? { perCustomisedProductBdt: perCust } : {}),
+      },
+      undefined,
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="label-caps">Advance to collect</span>
+        <span className="text-[10px] uppercase tracking-wider text-slate-500">how much customer pays now</span>
+      </div>
+      <p className="mb-3 text-[11px] text-slate-500">
+        Pick how the advance is calculated. <span className="text-slate-300">Per-product</span> mode lets
+        you charge a different advance for plain vs customised lines (both can be set — a mixed cart
+        pays both).
+      </p>
+      <div className="mb-4 inline-flex rounded-lg border border-white/[0.08] bg-black/30 p-0.5 text-xs">
+        {([
+          { id: "off", label: "No advance" },
+          { id: "fixed", label: "Fixed (per order)" },
+          { id: "per_product", label: "Per product" },
+        ] as Array<{ id: AdvanceMode; label: string }>).map((opt) => {
+          const active = currentMode === opt.id;
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => switchMode(opt.id)}
+              className={`px-3 py-1.5 rounded-md font-medium transition ${
+                active ? "bg-white/[0.08] text-slate-100" : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {currentMode === "fixed" && (
+        <Field
+          label="Fixed advance amount (BDT)"
+          hint="Same advance regardless of how many products the customer orders."
+        >
+          <input
+            type="number"
+            min={0}
+            value={fixedAmount ?? ""}
+            onChange={(e) => {
+              const v = e.target.value === "" ? 0 : Number(e.target.value);
+              onChange({ mode: "fixed", fixedAmountBdt: Number.isFinite(v) ? v : 0 }, undefined);
+            }}
+            placeholder="200"
+            className={inputCls}
+          />
+        </Field>
+      )}
+
+      {currentMode === "per_product" && (
+        <div className="grid gap-3 md:grid-cols-2">
+          <Field
+            label="Per plain product (BDT)"
+            hint="Charged per quantity for each cart line that has NO add-ons."
+          >
+            <input
+              type="number"
+              min={0}
+              value={perPlain ?? ""}
+              onChange={(e) => {
+                const raw = e.target.value;
+                const v = raw === "" ? undefined : Number(raw);
+                onChange(
+                  {
+                    mode: "per_product",
+                    ...(v != null && Number.isFinite(v) ? { perProductBdt: v } : {}),
+                    ...(perCust != null ? { perCustomisedProductBdt: perCust } : {}),
+                  },
+                  undefined,
+                );
+              }}
+              placeholder="200"
+              className={inputCls}
+            />
+          </Field>
+          <Field
+            label="Per customised product (BDT)"
+            hint="Charged per quantity for each line that has at least one add-on (e.g. name+number)."
+          >
+            <input
+              type="number"
+              min={0}
+              value={perCust ?? ""}
+              onChange={(e) => {
+                const raw = e.target.value;
+                const v = raw === "" ? undefined : Number(raw);
+                onChange(
+                  {
+                    mode: "per_product",
+                    ...(perPlain != null ? { perProductBdt: perPlain } : {}),
+                    ...(v != null && Number.isFinite(v) ? { perCustomisedProductBdt: v } : {}),
+                  },
+                  undefined,
+                );
+              }}
+              placeholder="500"
+              className={inputCls}
+            />
+          </Field>
+          <p className="md:col-span-2 text-[11px] text-slate-500">
+            Example: customer takes 2 jerseys — 1 customised, 1 plain. Per plain = 200, per customised = 500.
+            Advance to pay = 200 + 500 = <span className="text-slate-300">700 BDT</span>.
+          </p>
+        </div>
+      )}
+
+      {currentMode === "off" && (
+        <p className="text-[11px] text-slate-500">
+          No advance — the bot will treat the full subtotal as payable now (legacy behaviour).
+        </p>
+      )}
+    </div>
   );
 }

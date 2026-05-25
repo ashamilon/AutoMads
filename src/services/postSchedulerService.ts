@@ -1,6 +1,7 @@
 import { prisma } from "../db/prisma.js";
 import { logger } from "../utils/logger.js";
 import { publishScheduledPost } from "./socialPostService.js";
+import { processDueFollowUps } from "../agent/followUp.js";
 
 const POLL_INTERVAL_MS = 60_000;
 let running = false;
@@ -23,12 +24,19 @@ async function tick(): Promise<void> {
         await publishScheduledPost(post.id);
       } catch (e) {
         logger.error({ e: String(e), postId: post.id }, "Scheduler: publish failed");
-        await prisma.scheduledPost.update({
-          where: { id: post.id },
-          data: { status: "failed", failureReason: String(e) },
-        }).catch(() => undefined);
+        await prisma.scheduledPost
+          .update({
+            where: { id: post.id },
+            data: { status: "failed", failureReason: String(e) },
+          })
+          .catch(() => undefined);
       }
     }
+
+    // Phase 2: drain agent follow-ups.
+    await processDueFollowUps().catch((e: unknown) =>
+      logger.warn({ e: String(e) }, "Scheduler: agent follow-up drain failed"),
+    );
   } catch (e) {
     logger.error({ e: String(e) }, "Post scheduler tick error");
   } finally {

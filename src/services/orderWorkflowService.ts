@@ -59,6 +59,8 @@ import {
   fetchLessonHintsText,
   maybeRecordCorrectionFromInbound,
 } from "./conversationLearningService.js";
+import { isAgentEnabledForTenant, runAgentInbound } from "../agent/runner.js";
+import { resolveProductAddons } from "../agent/addonResolver.js";
 
 function buildTranId(orderId: string): string {
   return `TXN_${orderId.slice(0, 12)}_${Date.now()}`;
@@ -579,6 +581,156 @@ async function pickCandidateByCustomerImage(args: {
   return enriched.find((e) => e.sku === picked)?.row ?? null;
 }
 
+type PerPhotoCatalogMatch = {
+  photoIndex: number;
+  row: ProductMapping;
+  teamLabel: string;
+};
+
+/**
+ * One customer photo → team/club from vision → catalog candidates → best match
+ * (visual compare when several SKUs share the same team).
+ */
+async function resolveBestCatalogMatchForSingleCustomerImage(args: {
+  imageBase64: string;
+  mappings: ProductMapping[];
+  catalogLines: string;
+  validSkus: Set<string>;
+  caption?: string;
+}): Promise<{ row: ProductMapping; teamLabel: string } | null> {
+  const { imageBase64, mappings, catalogLines, validSkus, caption } = args;
+  let vision: Awaited<ReturnType<typeof identifyJerseyFromPhoto>> = null;
+  try {
+    vision = await identifyJerseyFromPhoto([imageBase64], caption);
+  } catch (e) {
+    logger.warn({ e: String(e) }, "Per-photo jersey vision skipped");
+  }
+
+  const visionNames = vision?.primaryNames?.filter((n) => n?.trim()) ?? [];
+  const teamLabel = visionNames.slice(0, 2).join(" / ").trim();
+  const jerseyDetected = vision && vision.kind !== "not_jersey" && visionNames.length > 0;
+
+  if (jerseyDetected) {
+    const candidates = findCatalogByJerseyEntities(mappings, visionNames, MAX_CATALOG_OPTION_LIST);
+    if (candidates.length === 1) {
+      return { row: candidates[0]!, teamLabel };
+    }
+    if (candidates.length >= 2) {
+      const visuallyPicked = await pickCandidateByCustomerImage({
+        customerImageBase64: imageBase64,
+        candidates,
+        validSkus,
+      }).catch((e) => {
+        logger.warn({ e: String(e) }, "Per-photo visual catalog compare failed");
+        return null;
+      });
+      if (visuallyPicked) return { row: visuallyPicked, teamLabel };
+      const textBest = findBestCatalogMatchByText(candidates, teamLabel || visionNames.join(" "));
+      if (textBest) return { row: textBest, teamLabel };
+    }
+  }
+
+  const catalogMatchCaption = jerseyDetected
+    ? [caption, `Jersey in photo (identified): ${visionNames.join(", ")}`].filter(Boolean).join(" | ")
+    : caption;
+  const matchedSku = await matchClientSkuFromCatalog({
+    catalogLines,
+    text: catalogMatchCaption,
+    imagesBase64: [imageBase64],
+    validSkus,
+  });
+  if (matchedSku) {
+    const row = mappings.find((m) => m.clientSku === matchedSku) ?? null;
+    if (row) {
+      return { row, teamLabel: teamLabel || (row.facebookLabel ?? row.clientSku).trim() };
+    }
+  }
+
+  return null;
+}
+
+async function resolveCatalogMatchesPerCustomerPhoto(args: {
+  imagesB64: string[];
+  mappings: ProductMapping[];
+  catalogLines: string;
+  validSkus: Set<string>;
+  caption?: string;
+}): Promise<PerPhotoCatalogMatch[]> {
+  const out: PerPhotoCatalogMatch[] = [];
+  const seenSkus = new Set<string>();
+  for (let i = 0; i < args.imagesB64.length; i++) {
+    const imageBase64 = args.imagesB64[i]!;
+    const hit = await resolveBestCatalogMatchForSingleCustomerImage({
+      imageBase64,
+      mappings: args.mappings,
+      catalogLines: args.catalogLines,
+      validSkus: args.validSkus,
+      caption: args.caption,
+    });
+    if (!hit || seenSkus.has(hit.row.clientSku)) continue;
+    seenSkus.add(hit.row.clientSku);
+    out.push({
+      photoIndex: i + 1,
+      row: hit.row,
+      teamLabel: hit.teamLabel || (hit.row.facebookLabel ?? hit.row.clientSku).trim(),
+    });
+  }
+  return out;
+}
+
+async function sendMultiPhotoCatalogMatchReply(args: {
+  matches: PerPhotoCatalogMatch[];
+  settings: ReturnType<typeof parseTenantSettings>;
+  pageAccessToken: string;
+  psid: string;
+  within24hWindow: boolean;
+  conversationId: string;
+  tenantSlug: string;
+}): Promise<void> {
+  const { matches, settings, pageAccessToken, psid, within24hWindow, conversationId, tenantSlug } = args;
+  const text = matches
+    .map((m) => buildDeterministicCatalogReply(m.row, { addOns: settings.addOns }))
+    .join("\n\n");
+  await sendMessengerText({ pageAccessToken, psid, text, within24hWindow });
+  await logAssistantTurn(conversationId, text);
+
+  const last = matches[matches.length - 1]!.row;
+  await setLastCatalogSku(conversationId, last.clientSku);
+  if (matches.length >= 2) {
+    await setCatalogOptionSkus(
+      conversationId,
+      matches.map((m) => m.row.clientSku),
+    );
+  }
+
+  const proxySecret = (config.catalogImageProxySecret || config.encryptionKey || "").trim();
+  const pubBase = config.publicBaseUrl.replace(/\/$/, "");
+  const useMessengerImageProxy =
+    proxySecret.length > 0 && pubBase.startsWith("https://") && !pubBase.includes("localhost");
+
+  for (const m of matches) {
+    const assets = extractCatalogAssets(m.row);
+    const firstUrl = assets.imageUrls[0];
+    if (!firstUrl) continue;
+    const imageUrl = useMessengerImageProxy
+      ? buildCatalogMessengerImageProxyUrl({
+          publicBaseUrl: pubBase,
+          tenantSlug,
+          clientSku: m.row.clientSku,
+          index: 0,
+          token: signCatalogImageToken(proxySecret, tenantSlug, m.row.clientSku, 0),
+        })
+      : firstUrl;
+    await sendImageAndLog({
+      pageAccessToken,
+      psid,
+      imageUrl,
+      within24hWindow,
+      conversationId,
+    }).catch((e) => logger.warn({ e: String(e), sku: m.row.clientSku }, "Multi-photo catalog image send skipped"));
+  }
+}
+
 async function sendCatalogFirstImagePreviews(args: {
   rows: ProductMapping[];
   pageAccessToken: string;
@@ -840,7 +992,7 @@ export async function appendManualPaymentAdminLog(args: {
     .catch(() => undefined);
 }
 
-async function findLatestPendingPaymentOrder(args: {
+export async function findLatestPendingPaymentOrder(args: {
   tenantId: string;
   psid: string;
 }) {
@@ -855,7 +1007,7 @@ async function findLatestPendingPaymentOrder(args: {
   });
 }
 
-async function sendManualPaymentTelegramAlert(args: {
+export async function sendManualPaymentTelegramAlert(args: {
   settings: ReturnType<typeof parseTenantSettings>;
   tenantSlug: string;
   psid: string;
@@ -952,6 +1104,13 @@ async function tryHandleManualPaymentTurn(args: {
   trimmed: string;
   imageUrlList: string[];
   within24h: boolean;
+  /**
+   * Phase 3.5: when the agent loop is on, treat manual-payment detection STRICTLY.
+   * Only intercept on a hard TrxID match (`bkash AB12CD34`, `nagad 9X7Y6Z5`) or a verified
+   * payment-screenshot image — not on conversational phrases like "payment korbo" / "bkash number din".
+   * Those go to the agent so it can answer with policy/manual numbers without looping.
+   */
+  agentEnabled?: boolean;
 }): Promise<boolean> {
   const {
     tenantId,
@@ -963,6 +1122,7 @@ async function tryHandleManualPaymentTurn(args: {
     trimmed,
     imageUrlList,
     within24h,
+    agentEnabled,
   } = args;
   const hasIncomingImages = imageUrlList.length > 0;
 
@@ -1022,6 +1182,9 @@ async function tryHandleManualPaymentTurn(args: {
 
   // Customer said "bkash done" / "payment kore diyechi" but no parsable id at all.
   if (!manualRef && !screenshotProof && openOrder && looksLikeManualPaymentMessage(trimmed)) {
+    // Agent on: prose like "payment korbo" / "bkash number din" goes to the agent so it can
+    // share manual numbers via get_shop_policies. Don't loop the customer with "TrxID din".
+    if (agentEnabled) return false;
     const askTrx =
       "Payment note korlam. TrxID / Txn ID ta din (example: bkash AB12CD34 / nagad 9X7Y6Z5) — na thakle screenshot pathaben. Tahole admin verify korte parbe.";
     await sendMessengerText({
@@ -1156,7 +1319,7 @@ async function tryHandleManualPaymentTurn(args: {
  * (e.g. "bkash 8A4G7P9R", "nagad txn 12345678", "send korechi 9XYZ").
  * Returns the rail + extracted reference if obvious.
  */
-function detectManualPaymentReference(
+export function detectManualPaymentReference(
   text: string,
 ): { rail: ManualPaymentRail; reference: string } | null {
   const t = text.trim();
@@ -1189,7 +1352,7 @@ function detectManualPaymentReference(
 }
 
 /** Fallback parser for cases where customer sends only raw trx id (no bkash/nagad keyword). */
-function detectLooseTxnReference(text: string): string | null {
+export function detectLooseTxnReference(text: string): string | null {
   const t = text.trim();
   if (!t) return null;
   if (looksLikeOrderDetailsSupply(t)) return null;
@@ -1235,7 +1398,7 @@ function detectShortTxnReferenceWithOpenOrder(text: string): string | null {
   return reference || null;
 }
 
-function looksLikeManualPaymentMessage(text: string): boolean {
+export function looksLikeManualPaymentMessage(text: string): boolean {
   const t = text.trim().toLowerCase();
   if (!t) return false;
   return /\b(b[\s-]?kash|bkas|nagad|payment|paid|send\s*money|sendmoney|transaction|trx|txn|txid|trax)\b/i.test(
@@ -1851,19 +2014,25 @@ function resolveProductAddOnCatalog(args: {
   settings: ReturnType<typeof parseTenantSettings>;
   meta: Record<string, unknown>;
 }): Array<{ id: string; label: string; priceBdt: number }> {
+  // Per-product opt-in is now the authoritative source — see src/agent/addonResolver.ts.
+  // We map its result through the legacy normalisation below (slug rewrite for name-number,
+  // legacy `allowNameNumber` shim) so existing reply builders keep working unchanged.
+  const resolved = resolveProductAddons({
+    productMetadata: args.meta,
+    tenantSettings: args.settings,
+  });
+
   const out: Array<{ id: string; label: string; priceBdt: number }> = [];
   const seen = new Set<string>();
-  for (const a of args.settings.addOns ?? []) {
-    if (!a || a.enabled === false) continue;
-    const label = String(a.label ?? "").trim();
-    if (!label) continue;
-    const slug = String(a.id ?? label.toLowerCase().replace(/\s+/g, "-")).trim();
-    const id = looksLikeNameNumberAddOn({ id: slug, label }) ? "name-number" : slug;
-    const priceBdt = a.free === true ? 0 : coerceAddonPriceBdt(a.priceBdt);
+  for (const a of resolved) {
+    const slug = String(a.id ?? "").trim();
+    const id = looksLikeNameNumberAddOn({ id: slug, label: a.label }) ? "name-number" : slug;
     if (seen.has(id)) continue;
     seen.add(id);
-    out.push({ id, label, priceBdt });
+    out.push({ id, label: a.label, priceBdt: a.priceBdt });
   }
+  // Legacy `allowNameNumber=true` flag on a product still adds Name+Number when the new system
+  // isn't in use. Once the merchant uses the new per-product picker, this flag is irrelevant.
   const allowNameNumber =
     String(args.meta["allowNameNumber"] ?? args.meta["allow_name_number"] ?? "").toLowerCase() === "true" ||
     args.meta["allowNameNumber"] === true;
@@ -2163,7 +2332,7 @@ async function speak(opts: {
   psid?: string;
 }): Promise<string> {
   const hasConvo = Boolean(opts.conversationId);
-  // Serialize reads: tiny servers / Supabase pooled URLs often allow only 1 logical connection — parallel
+  // Serialize reads: tiny servers / pooled DB URLs often allow only 1 logical connection — parallel
   // prisma calls exhaust the pool (P2024) under load.
   const recent = hasConvo
     ? await prisma.messengerMessage.findMany({
@@ -2860,6 +3029,8 @@ export async function handleInboundMessengerMessage(params: {
   // Patch the tenant object so all downstream helpers use the correct page token
   (tenant as { facebookPageAccessToken: string }).facebookPageAccessToken = effectivePageToken;
 
+  const agentEnabled = await isAgentEnabledForTenant(params.tenantId);
+
   const now = new Date();
   const convoUpsert = await prisma.messengerConversation.upsert({
     where: { tenantId_psid: { tenantId: params.tenantId, psid: params.psid } },
@@ -2919,8 +3090,28 @@ export async function handleInboundMessengerMessage(params: {
     trimmed,
     imageUrlList,
     within24h,
+    agentEnabled,
   });
   if (manualHandled) return;
+
+  // ── Agent loop (phase 1, opt-in via tenant.settings.agent.enabled) ────────
+  // Runs after manual payment so bKash/Nagad TrxIDs continue to flow through legacy.
+  // On "handled" or "errored" the agent has already replied → return.
+  // On "skipped" we fall through to the legacy switchboard.
+  if (agentEnabled) {
+    const agentResult = await runAgentInbound({
+      tenantId: params.tenantId,
+      tenantSlug: params.tenantSlug,
+      psid: params.psid,
+      conversationId,
+      userText: trimmed,
+      imageUrls: imageUrlList,
+      pageAccessToken,
+      within24h,
+    });
+    if (agentResult !== "skipped") return;
+  }
+
 
   const mappings = await prisma.productMapping.findMany({
     where: { tenantId: params.tenantId },
@@ -3741,6 +3932,35 @@ export async function handleInboundMessengerMessage(params: {
       await setLastCatalogSku(conversationId, selectedFromOptions.clientSku);
     }
 
+    if (
+      hasIncomingImages &&
+      imagesB64.length >= 2 &&
+      !selectedFromOptions &&
+      !looksLikeOrderDetailsSupply(trimmed)
+    ) {
+      const catalogLinesMulti = buildCatalogLinesForLlm(mappings);
+      const validSkusMulti = new Set(mappings.map((m) => m.clientSku));
+      const perPhotoMatches = await resolveCatalogMatchesPerCustomerPhoto({
+        imagesB64,
+        mappings,
+        catalogLines: catalogLinesMulti,
+        validSkus: validSkusMulti,
+        caption: trimmed || undefined,
+      });
+      if (perPhotoMatches.length > 0) {
+        await sendMultiPhotoCatalogMatchReply({
+          matches: perPhotoMatches,
+          settings,
+          pageAccessToken,
+          psid: params.psid,
+          within24hWindow: within24h,
+          conversationId,
+          tenantSlug: params.tenantSlug,
+        });
+        return;
+      }
+    }
+
     const cartEmpty = getCartItemsFromDraft(convo.pendingDraftJson).length === 0;
     if (
       !hasIncomingImages &&
@@ -4442,7 +4662,7 @@ export async function handleInboundMessengerMessage(params: {
           return;
         }
         if (availableAd.length > 0) {
-          const hint = `Ei product e available add-ons: ${availableAd.map((a) => `${a.label}${a.free || a.priceBdt === 0 ? " (FREE)" : a.priceBdt ? ` (+${a.priceBdt} BDT)` : ""}`).join(", ")}.`;
+          const hint = `Ei product e available add-ons: ${availableAd.map((a) => `${a.label}${a.priceBdt === 0 ? " (FREE)" : a.priceBdt ? ` (+${a.priceBdt} BDT)` : ""}`).join(", ")}.`;
           const replyHint = `${hint}\nJeta niben seta likhen (example: Official Font / Patches / Name + Number).`;
           await sendMessengerText({ pageAccessToken, psid: params.psid, text: replyHint, within24hWindow: within24h });
           await logAssistantTurn(conversationId, replyHint);
@@ -4787,7 +5007,9 @@ async function runPostPaymentPipeline(opts: {
     }
   }
 
-  const pathaoCfgRaw = settings.pathao as (PathaoTenantConfig & { isLive?: boolean }) | undefined;
+  const pathaoCfgRaw = settings.pathao as
+    | (PathaoTenantConfig & { isLive?: boolean; bookingMode?: "automatic" | "manual" | "smart" })
+    | undefined;
   const pathaoCfg: PathaoTenantConfig | undefined = pathaoCfgRaw
     ? {
         ...pathaoCfgRaw,

@@ -114,3 +114,43 @@ export async function apiFormPost<T>(path: string, form: FormData): Promise<T> {
   }
   return data as T;
 }
+
+
+/**
+ * Authenticated GET that opens the response (e.g. a PDF) in a new tab via a blob URL.
+ * Used by buttons like "Download Invoice" where window.open won't carry our Bearer token
+ * and the API URL lives on a different host than the Next.js portal.
+ */
+export async function apiOpenBlob(path: string): Promise<void> {
+  const key = getStoredApiKey();
+  if (!key) throw new Error("Not signed in");
+  let res: Response;
+  try {
+    res = await fetch(`${getApiBase()}${path}`, {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+  } catch {
+    throw new ApiError(
+      "Network error — is the API running on " + getApiBase() + "?",
+      0,
+      "",
+    );
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ApiError(text || `HTTP ${res.status}`, res.status, text);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  // Open in a new tab; revoke after a beat so the new tab has time to load.
+  const win = window.open(url, "_blank", "noopener,noreferrer");
+  if (!win) {
+    // Popup blocked — fall back to a download link.
+    const a = document.createElement("a");
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.click();
+  }
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}

@@ -33,7 +33,7 @@ export const config = {
   conversationLearningEnabled: (process.env.CONVERSATION_LEARNING_ENABLED ?? "true").toLowerCase() !== "false",
   /**
    * RAG loads recent KnowledgeExample rows per tenant. Each row carries a large embedding vector;
-   * loading the whole table can hit Postgres `statement_timeout` (e.g. on Supabase). Cap rows here.
+   * loading the whole table can hit Postgres `statement_timeout` on hosted databases. Cap rows here.
    */
   ragKnowledgeMaxRows: (() => {
     const n = Number(process.env.RAG_KNOWLEDGE_MAX_ROWS ?? 2000);

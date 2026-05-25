@@ -66,6 +66,11 @@ const MANUAL_SIMPLE_KEYS = new Set([
   "size_stocks",
   "variants",
   "tags",
+  "addOnIds",
+  "addonIds",
+  "addons",
+  "addOnOverrides",
+  "addonOverrides",
 ]);
 
 const SIZE_LABEL_ORDER = ["XS", "S", "M", "L", "XL", "XXL", "2XL", "XXXL", "3XL"];
@@ -162,6 +167,17 @@ function readProductMeta(row: ProductMappingRow): Record<string, unknown> {
   return {};
 }
 
+type TenantAddOn = {
+  id: string;
+  label: string;
+  priceBdt?: number;
+  description?: string;
+  enabled?: boolean;
+  free?: boolean;
+  aliases?: string[];
+  category?: string;
+};
+
 /** Lines for the photo URLs box (primary + legacy keys). */
 function photoUrlsTextFromMeta(meta: Record<string, unknown>): string {
   const lines: string[] = [];
@@ -228,6 +244,11 @@ function buildManualMetadata(args: {
   tagsText: string;
   sizeStockRows: ManualSizeStockRow[];
   advancedJson: string;
+  /** Add-on selection for this product. When `useTenantDefault=true`, no addOnIds are written. */
+  useTenantDefaultAddOns: boolean;
+  selectedAddOnIds: string[];
+  addOnPriceOverrides: Record<string, string>;
+  addOnFreeOverrides: Record<string, boolean>;
 }): { ok: true; metadata: Record<string, unknown> } | { ok: false; error: string } {
   let extra: Record<string, unknown> = {};
   const adv = args.advancedJson.trim();
@@ -283,6 +304,41 @@ function buildManualMetadata(args: {
     merged.jerseyVersion = args.jerseyVersion;
   }
 
+  // Add-on opt-in: when explicit, write `addOnIds` (possibly empty array → "no add-ons offered")
+  // and `addOnOverrides` for any per-product price/free overrides. When the user picked "use shop
+  // default", strip these keys so the resolver falls back to all enabled tenant add-ons.
+  if (args.useTenantDefaultAddOns) {
+    delete merged.addOnIds;
+    delete merged.addonIds;
+    delete merged.addons;
+    delete merged.addOnOverrides;
+    delete merged.addonOverrides;
+  } else {
+    merged.addOnIds = args.selectedAddOnIds.slice();
+    delete merged.addonIds;
+    delete merged.addons;
+    const overrides: Record<string, { priceBdt?: number; free?: boolean }> = {};
+    for (const id of args.selectedAddOnIds) {
+      const isFree = !!args.addOnFreeOverrides[id];
+      const priceStr = (args.addOnPriceOverrides[id] ?? "").trim();
+      const entry: { priceBdt?: number; free?: boolean } = {};
+      if (isFree) entry.free = true;
+      if (!isFree && priceStr !== "") {
+        const n = Number(priceStr);
+        if (!Number.isFinite(n) || n < 0) {
+          return { ok: false, error: `Add-on price override for "${id}" must be a non-negative number.` };
+        }
+        entry.priceBdt = n;
+      }
+      if (Object.keys(entry).length > 0) overrides[id] = entry;
+    }
+    if (Object.keys(overrides).length > 0) merged.addOnOverrides = overrides;
+    else {
+      delete merged.addOnOverrides;
+      delete merged.addonOverrides;
+    }
+  }
+
   const urls = parsePhotoUrlLines(args.photoUrlsText);
   if (urls.length > 0) merged.images = urls;
 
@@ -314,6 +370,18 @@ export default function CatalogPage() {
   const [sizeStockRows, setSizeStockRows] = useState<ManualSizeStockRow[]>(() => emptySizeStockRows(4));
   const [advancedJson, setAdvancedJson] = useState("{}");
   const [manualAdvancedOpen, setManualAdvancedOpen] = useState(false);
+
+  // Per-product add-on opt-in (phase 3.5): true = inherit shop-wide enabled add-ons, false = explicit list.
+  const [useTenantDefaultAddOns, setUseTenantDefaultAddOns] = useState(true);
+  const [selectedAddOnIds, setSelectedAddOnIds] = useState<string[]>([]);
+  const [addOnPriceOverrides, setAddOnPriceOverrides] = useState<Record<string, string>>({});
+  const [addOnFreeOverrides, setAddOnFreeOverrides] = useState<Record<string, boolean>>({});
+
+  const tenantAddOns: TenantAddOn[] = (() => {
+    const raw = tenant?.settings?.addOns;
+    if (!Array.isArray(raw)) return [];
+    return (raw as TenantAddOn[]).filter((a) => a && a.label && a.enabled !== false);
+  })();
   const [feedback, setFeedback] = useState("");
   const [mode, setMode] = useState<CatalogMode>("upload");
 
@@ -402,6 +470,10 @@ export default function CatalogPage() {
         tagsText,
         sizeStockRows,
         advancedJson,
+        useTenantDefaultAddOns,
+        selectedAddOnIds,
+        addOnPriceOverrides,
+        addOnFreeOverrides,
       });
       if (!built.ok) {
         setFeedback(built.error);
@@ -426,6 +498,10 @@ export default function CatalogPage() {
       setJerseyVersion("");
       setSizeStockRows(emptySizeStockRows(4));
       setAdvancedJson("{}");
+      setUseTenantDefaultAddOns(true);
+      setSelectedAddOnIds([]);
+      setAddOnPriceOverrides({});
+      setAddOnFreeOverrides({});
       setFeedback("Saved.");
       await load();
     } finally {
@@ -635,6 +711,30 @@ export default function CatalogPage() {
           : "",
     );
     setSizeStockRows(readSizeStocksFromMetaForForm(meta));
+    // Hydrate per-product add-on selection.
+    const rawIds = meta.addOnIds ?? meta.addonIds ?? meta.addons;
+    if (Array.isArray(rawIds)) {
+      const ids = (rawIds as unknown[]).map((x) => String(x ?? "").trim()).filter(Boolean);
+      setUseTenantDefaultAddOns(false);
+      setSelectedAddOnIds(ids);
+    } else {
+      setUseTenantDefaultAddOns(true);
+      setSelectedAddOnIds([]);
+    }
+    const rawOv = meta.addOnOverrides ?? meta.addonOverrides;
+    const priceOv: Record<string, string> = {};
+    const freeOv: Record<string, boolean> = {};
+    if (rawOv && typeof rawOv === "object" && !Array.isArray(rawOv)) {
+      for (const [id, val] of Object.entries(rawOv as Record<string, unknown>)) {
+        if (!val || typeof val !== "object" || Array.isArray(val)) continue;
+        const v = val as Record<string, unknown>;
+        if (v.free === true) freeOv[id] = true;
+        if (typeof v.priceBdt === "number") priceOv[id] = String(v.priceBdt);
+        else if (typeof v.priceBdt === "string") priceOv[id] = v.priceBdt;
+      }
+    }
+    setAddOnPriceOverrides(priceOv);
+    setAddOnFreeOverrides(freeOv);
     const rest = metaForAdvancedEditor(meta);
     setAdvancedJson(Object.keys(rest).length > 0 ? JSON.stringify(rest, null, 2) : "{}");
     setManualAdvancedOpen(Object.keys(rest).length > 0);
@@ -1248,6 +1348,97 @@ export default function CatalogPage() {
                   className={`${inputCls} text-sm leading-relaxed`}
                 />
               </Field>
+
+              <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <p className="text-sm font-medium text-slate-200">Add-ons available for this product</p>
+                  <span className="text-[10px] uppercase tracking-wider text-slate-500">
+                    {tenantAddOns.length} configured shop-wide
+                  </span>
+                </div>
+                {tenantAddOns.length === 0 ? (
+                  <p className="rounded-lg bg-white/[0.03] px-3 py-2 text-xs text-slate-400">
+                    No shop-wide add-ons yet. Configure them in{" "}
+                    <span className="font-medium text-slate-200">Settings → Add-ons</span> first.
+                  </p>
+                ) : (
+                  <>
+                    <label className="mb-2 flex items-center gap-2 text-xs text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={useTenantDefaultAddOns}
+                        onChange={(e) => setUseTenantDefaultAddOns(e.target.checked)}
+                      />
+                      Use shop-wide defaults (all enabled add-ons apply to this product)
+                    </label>
+                    {!useTenantDefaultAddOns && (
+                      <div className="space-y-2">
+                        <p className="text-[11px] text-slate-500">
+                          Pick which add-ons this specific product accepts. Optionally override the price or mark
+                          it FREE just for this SKU.
+                        </p>
+                        {tenantAddOns.map((a) => {
+                          const checked = selectedAddOnIds.includes(a.id);
+                          const overridePrice = addOnPriceOverrides[a.id] ?? "";
+                          const overrideFree = !!addOnFreeOverrides[a.id];
+                          return (
+                            <div
+                              key={a.id}
+                              className="flex flex-wrap items-center gap-2 rounded-lg bg-white/[0.02] px-2 py-1.5"
+                            >
+                              <label className="flex flex-1 min-w-0 items-center gap-2 text-xs text-slate-200">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={(e) =>
+                                    setSelectedAddOnIds((prev) =>
+                                      e.target.checked
+                                        ? [...new Set([...prev, a.id])]
+                                        : prev.filter((x) => x !== a.id),
+                                    )
+                                  }
+                                />
+                                <span className="truncate">{a.label}</span>
+                                <span className="shrink-0 text-[10px] text-slate-500">
+                                  default: {a.free ? "FREE" : a.priceBdt != null ? `${a.priceBdt} BDT` : "—"}
+                                </span>
+                              </label>
+                              <input
+                                type="number"
+                                min={0}
+                                placeholder="override price"
+                                disabled={!checked || overrideFree}
+                                value={overrideFree ? "" : overridePrice}
+                                onChange={(e) =>
+                                  setAddOnPriceOverrides((prev) => ({ ...prev, [a.id]: e.target.value }))
+                                }
+                                className={`${inputCls} h-8 w-28 text-xs disabled:opacity-50`}
+                              />
+                              <label className="flex items-center gap-1 text-[10px] text-slate-300">
+                                <input
+                                  type="checkbox"
+                                  disabled={!checked}
+                                  checked={overrideFree}
+                                  onChange={(e) =>
+                                    setAddOnFreeOverrides((prev) => ({ ...prev, [a.id]: e.target.checked }))
+                                  }
+                                />
+                                FREE for this product
+                              </label>
+                            </div>
+                          );
+                        })}
+                        {selectedAddOnIds.length === 0 && (
+                          <p className="text-[11px] text-amber-300/80">
+                            None selected — this product will offer NO add-ons.
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
               <div className="rounded-xl border border-white/[0.08] bg-white/[0.02]">
                 <button
                   type="button"
