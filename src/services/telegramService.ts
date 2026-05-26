@@ -55,6 +55,50 @@ export async function sendTelegramMessage(args: {
   await axios.post(`${apiBase(args.botToken)}/sendMessage`, body, { timeout: 20_000 });
 }
 
+/**
+ * Upload a local file to Telegram via the `sendDocument` endpoint.
+ *
+ * Used by the post-payment pipeline to ship a copy of the invoice PDF to the
+ * tenant's own Telegram chat right after a payment is confirmed. Pure
+ * best-effort — surfaces errors via the returned promise so callers can wrap
+ * in a `.catch` + warn log without disrupting the main flow.
+ *
+ * The `caption` field shows up under the file in the Telegram client. Keep
+ * it short (Telegram caps at 1024 chars).
+ *
+ * Implementation note: Telegram requires a real `multipart/form-data` request
+ * for file uploads — JSON won't work — so we lazily import Node's built-in
+ * `node:fs` + `form-data` to build the body. `form-data` is already a
+ * transitive dependency through axios.
+ */
+export async function sendTelegramDocument(args: {
+  botToken: string;
+  chatId: string;
+  filePath: string;
+  filename?: string;
+  caption?: string;
+}): Promise<void> {
+  const fs = await import("node:fs");
+  const FormData = (await import("form-data")).default;
+  const stat = await fs.promises.stat(args.filePath).catch(() => null);
+  if (!stat || !stat.isFile()) {
+    throw new Error(`telegram_doc_missing_file: ${args.filePath}`);
+  }
+  const fd = new FormData();
+  fd.append("chat_id", args.chatId);
+  if (args.caption) fd.append("caption", args.caption.slice(0, 1024));
+  fd.append("document", fs.createReadStream(args.filePath), {
+    filename: args.filename ?? args.filePath.split(/[\\/]/).pop() ?? "invoice.pdf",
+    contentType: "application/pdf",
+  });
+  await axios.post(`${apiBase(args.botToken)}/sendDocument`, fd, {
+    headers: fd.getHeaders(),
+    timeout: 30_000,
+    maxContentLength: 50 * 1024 * 1024,
+    maxBodyLength: 50 * 1024 * 1024,
+  });
+}
+
 export async function answerTelegramCallback(args: {
   botToken: string;
   callbackQueryId: string;

@@ -202,13 +202,17 @@ export const confirmTools: ToolDef[] = [
   {
     name: "confirm_order",
     description:
-      "Finalise the customer's cart into an Order. Re-reads every line from the catalog (price + stock + active flag) before committing. Refuses if profile is incomplete or any line drifted. On success, creates the Order, opens an SSL payment session if configured, sends the payment block to the customer, schedules a payment-reminder follow-up, and ENDS the turn. Only call when the customer has explicitly said order/checkout/confirm and a real cart exists.",
+      "Finalise the customer's order list into a real Order. This MUST be called for EVERY rail (bKash, Nagad, SSLCommerz, AamarPay, COD, manual) — sharing payment numbers in a plain reply does NOT create an order. Re-reads every line from the catalog (price + stock + active flag) before committing. Refuses if profile is incomplete, payment_method is missing, or any line drifted. On success: creates the Order row, picks the right gateway (SSL → AamarPay → bKash Tokenized → manual bKash/Nagad → COD), opens a payment session if applicable, sends the payment block to the customer, schedules a payment-reminder follow-up, and ENDS the turn. Call as soon as: cart has lines with sizes, profile has name+phone+address, customer has chosen a rail (set via save_session_state confirmed_information.order.payment_method).",
     paramsSchema: Args,
     paramsHint: "{}",
     terminal: true,
     examples: [
       {
-        when: "Customer says 'order confirm' and cart has at least one item with size, and profile has name+phone+address",
+        when: "Customer says 'order confirm' or 'bkash e pay korbo' or 'ssl e pay korbo' and cart + profile are complete",
+        call: { tool: "confirm_order", args: {} },
+      },
+      {
+        when: "Customer chose a manual rail (bkash/nagad) — confirm_order still needed BEFORE the customer pays, so the Order row exists when the TrxID arrives",
         call: { tool: "confirm_order", args: {} },
       },
     ],

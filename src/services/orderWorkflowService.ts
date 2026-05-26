@@ -1,12 +1,13 @@
 import { Prisma, type ProductMapping, type Tenant, type TenantIntegration } from "@prisma/client";
 import { prisma } from "../db/prisma.js";
 import {
+  classifyImageContent,
+  classifyMessengerImageAsFinancialPaymentScreenshot,
   extractOrderFromTextAndImages,
   generateReply,
   identifyJerseyFromPhoto,
   matchClientSkuFromCatalog,
   pickCatalogByVisualComparison,
-  classifyMessengerImageAsFinancialPaymentScreenshot,
   type BotPersona,
   type ConversationTurn,
   type ReplyIntent,
@@ -33,7 +34,7 @@ import {
 } from "./banglishCartReplyService.js";
 import { validateOrderForClientSync } from "./orderValidationService.js";
 import { decideOrderCreate } from "./orderDecisionGraph.js";
-import { ensureTelegramWebhook, sendTelegramMessage } from "./telegramService.js";
+import { ensureTelegramWebhook, sendTelegramDocument, sendTelegramMessage } from "./telegramService.js";
 import { generateInvoicePdf } from "./invoicePdfService.js";
 import { getIntegrationAdapter } from "../integrations/integrationFactory.js";
 import { initiatePaymentSession } from "../integrations/sslcommerz/sslcommerzService.js";
@@ -598,17 +599,19 @@ type PerPhotoCatalogMatch = {
 };
 
 /**
- * One customer photo → team/club from vision → catalog candidates → best match
- * (visual compare when several SKUs share the same team).
+ * One customer photo → catalog match.
  *
- * HARD GATE: when the vision pass says the photo isn't a football jersey at
- * all (a person, a t-shirt, a screenshot, etc.), this returns null without
- * touching the catalog matcher — that matcher is greedy and will happily
- * pick "the closest catalog row" for any image, which produced false
- * positives like "girl photo → jersey SKU" before this guard.
+ * Domain-agnostic gate: we first call the generic image classifier
+ * (`classifyImageContent`) which returns one of several content types
+ * without assuming what the catalog contains. Only when the photo is a
+ * plausible product photo do we attempt catalog matching at all.
  *
- * Same for `kind === "unknown"` with low confidence: we'd rather come back
- * empty and ask the customer for a clearer photo than bake in a wrong SKU.
+ * Jersey identification still runs as an enrichment pass for jersey-shaped
+ * catalogs — when it returns a team / club, we use that to narrow candidates
+ * and to feed the visual-compare prompt — but the JERSEY pass NEVER gates
+ * the matcher. Other tenant catalogs (shoes, electronics, sarees) just see
+ * the jersey pass come back empty and continue with the generic catalog
+ * matcher, which is itself catalog-agnostic.
  */
 async function resolveBestCatalogMatchForSingleCustomerImage(args: {
   imageBase64: string;
@@ -618,39 +621,67 @@ async function resolveBestCatalogMatchForSingleCustomerImage(args: {
   caption?: string;
 }): Promise<{ row: ProductMapping; teamLabel: string } | null> {
   const { imageBase64, mappings, catalogLines, validSkus, caption } = args;
+
+  // ── STEP 1: domain-agnostic content classification ─────────────────────
+  const content = await classifyImageContent([imageBase64], caption);
+
+  // Hard gate: classifier confidently said "this is not a product".
+  // We refuse to bounce into the catalog matcher for non-product photos
+  // (selfies, screenshots, documents, random objects) regardless of what the
+  // shop sells. This is what stops "girl photo → jersey SKU" misfires.
+  const captionHasContent = (caption?.trim().length ?? 0) >= 3;
+  if (content && !content.isProductLikely) {
+    if (
+      content.contentType === "person_or_selfie" ||
+      content.contentType === "random_object" ||
+      content.contentType === "document" ||
+      content.contentType === "chat_screenshot"
+    ) {
+      logger.info(
+        {
+          contentType: content.contentType,
+          confidence: content.confidence,
+          shortDescription: content.shortDescription?.slice(0, 80),
+        },
+        "Vision: photo is not a product — skipping catalog match",
+      );
+      return null;
+    }
+    if (content.contentType === "unclear" && !captionHasContent) {
+      logger.info(
+        { confidence: content.confidence },
+        "Vision: photo unclear and no caption — skipping catalog match",
+      );
+      return null;
+    }
+    // payment_screenshot is handled upstream in the manual-payment path; if
+    // we ever reach here on one, we still don't catalog-match it.
+    if (content.contentType === "payment_screenshot") {
+      return null;
+    }
+  }
+
+  // ── STEP 2: jersey-domain enrichment (best-effort) ──────────────────────
+  // For jersey-shaped catalogs the jersey identifier gives us a tighter
+  // candidate set and a better visual-compare prompt. For non-jersey
+  // catalogs the helper just comes back empty / unknown and we drop through
+  // to the generic matcher. Note: we deliberately do NOT gate on
+  // `kind === "not_jersey"` here anymore — the generic classifier above is
+  // the only gate, and a "not_jersey" verdict on a sneaker shop's catalog
+  // would be a false negative.
   let vision: Awaited<ReturnType<typeof identifyJerseyFromPhoto>> = null;
   try {
     vision = await identifyJerseyFromPhoto([imageBase64], caption);
   } catch (e) {
     logger.warn({ e: String(e) }, "Per-photo jersey vision skipped");
   }
-
   const visionNames = vision?.primaryNames?.filter((n) => n?.trim()) ?? [];
   const teamLabel = visionNames.slice(0, 2).join(" / ").trim();
   const jerseyDetected = vision && vision.kind !== "not_jersey" && visionNames.length > 0;
 
-  // ── HARD GATE 1: photo isn't a jersey ───────────────────────────────────
-  // A girl photo, a t-shirt, a screenshot — none of these should land on a
-  // catalog SKU. The matcher would happily pick the closest row, so we stop
-  // here. The caller surfaces a friendly "send a clearer jersey photo" reply.
-  if (vision?.kind === "not_jersey") {
-    logger.info(
-      {
-        kind: vision.kind,
-        confidence: vision.confidence,
-        notes: vision.notes?.slice(0, 80),
-      },
-      "Vision: photo is not a jersey — skipping catalog match",
-    );
-    return null;
-  }
-
   if (jerseyDetected) {
     const candidates = findCatalogByJerseyEntities(mappings, visionNames, MAX_CATALOG_OPTION_LIST);
     if (candidates.length === 1) {
-      // Single team match in our catalog AND the vision pass had at least
-      // medium confidence — safe to commit. If confidence is low we still
-      // commit because the catalog narrowed it for us.
       return { row: candidates[0]!, teamLabel };
     }
     if (candidates.length >= 2) {
@@ -668,34 +699,22 @@ async function resolveBestCatalogMatchForSingleCustomerImage(args: {
     }
   }
 
-  // ── HARD GATE 2: vision pass had no useful identification ───────────────
-  // `vision.kind === "unknown"` AND no team named — we don't trust the
-  // catalog matcher to pick correctly from a vague image. Return null so the
-  // caller can ask for a clearer photo. Without this, a blurry "is this a
-  // jersey or a hoodie?" image would still get force-matched.
-  if (vision && vision.kind === "unknown" && visionNames.length === 0) {
-    logger.info(
-      { kind: vision.kind, confidence: vision.confidence },
-      "Vision: jersey unknown — skipping catalog match (will ask customer)",
-    );
-    return null;
-  }
-
-  // Caption-led fallback: only when the customer's TEXT mentioned something
-  // catalog-like. If the customer sent only an image and vision didn't ID it,
-  // we shouldn't blindly match by image alone here.
-  const captionHasContent = (caption?.trim().length ?? 0) >= 3;
-  if (!captionHasContent && !jerseyDetected) {
-    logger.info("Vision: no caption + no jersey ID — skipping catalog match");
-    return null;
-  }
-
-  const catalogMatchCaption = jerseyDetected
-    ? [caption, `Jersey in photo (identified): ${visionNames.join(", ")}`].filter(Boolean).join(" | ")
-    : caption;
+  // ── STEP 3: generic catalog match ───────────────────────────────────────
+  // The catalog matcher accepts any image+text pair. We only get here when
+  // the content gate said "product likely" (or returned null and the caller
+  // gave us a useful caption). The matcher itself is conservative — it
+  // returns null when nothing in the catalog clearly matches.
+  const enrichedCaption = (() => {
+    const parts: string[] = [];
+    if (caption?.trim()) parts.push(caption.trim());
+    if (jerseyDetected) parts.push(`Jersey in photo (identified): ${visionNames.join(", ")}`);
+    if (content?.shortDescription) parts.push(`Image shows: ${content.shortDescription}`);
+    if (content?.productCategory) parts.push(`Category hint: ${content.productCategory}`);
+    return parts.length > 0 ? parts.join(" | ") : caption;
+  })();
   const matchedSku = await matchClientSkuFromCatalog({
     catalogLines,
-    text: catalogMatchCaption,
+    text: enrichedCaption,
     imagesBase64: [imageBase64],
     validSkus,
   });
@@ -988,8 +1007,8 @@ function buildNoContextCatalogReply(
   }
   if (intent === "ask_price_stock") {
     const addon = buildTenantAddonSnippet(settings.addOns);
-    if (addon) return `Konta product er price/stock? Product name bolen, ami catalog theke check kori.\n${addon}`;
-    return "Konta product er price/stock? Product name bolen, ami catalog theke check kori.";
+    if (addon) return `Konta product er price/stock? Product name bolen, ami check kore bolchi.\n${addon}`;
+    return "Konta product er price/stock? Product name bolen, ami check kore bolchi.";
   }
   if (intent === "ask_order") {
     return "Order korte: product name, size, qty, naam, address, phone — ei tothyo gulo den, ami order place kori.";
@@ -4286,30 +4305,67 @@ export async function handleInboundMessengerMessage(params: {
         visionNames.length > 0 &&
         jerseyVision &&
         jerseyVision.kind !== "not_jersey";
-      // HARD GATE: when the customer sent ONLY images (no text) and the
-      // vision pass said "not a jersey", do NOT bounce into matchClientSkuFromCatalog
-      // — that matcher will pick the closest SKU even for random photos. We'd
-      // rather fall through to the friendly "send a clearer jersey photo" reply.
-      const visionSaysNotJersey =
-        hasIncomingImages && jerseyVision != null && jerseyVision.kind === "not_jersey";
+      // Domain-agnostic gate: if the customer sent ONLY images and the
+      // generic image classifier said it's not a product (selfie, document,
+      // random object, chat screenshot), do NOT bounce into the catalog
+      // matcher — that matcher is greedy and will pick the closest SKU even
+      // for irrelevant photos. We reply with a warm "send a clearer product
+      // photo or type the product name" instead. Works for any catalog
+      // (jerseys, shoes, electronics, sarees) without baking in
+      // jersey-shaped assumptions.
       const captionHasContent = (trimmed?.trim().length ?? 0) >= 3;
-      if (visionSaysNotJersey && !captionHasContent && jerseyVision) {
-        logger.info(
-          { kind: jerseyVision.kind, confidence: jerseyVision.confidence },
-          "Single-image fallback: photo is not a jersey — skipping forced catalog match",
-        );
-        // Send a warm Banglish nudge so the customer sends a clearer jersey
-        // photo or types what they want. One reply, then short-circuit.
-        const friendly =
-          "Photo te clear jersey ta dekhte parchi na 🙂 jersey er front side er ekta clear photo pathaben? Nahole product name likhe pathale ami catalog theke khuje dichchi.";
-        await sendMessengerText({
-          pageAccessToken,
-          psid: params.psid,
-          text: friendly,
-          within24hWindow: within24h,
+      let imageContent: Awaited<ReturnType<typeof classifyImageContent>> = null;
+      if (hasIncomingImages && imagesB64.length > 0 && !captionHasContent) {
+        imageContent = await classifyImageContent(imagesB64, trimmed || undefined).catch((e) => {
+          logger.warn({ e: String(e) }, "classifyImageContent skipped");
+          return null;
         });
-        await logAssistantTurn(conversationId, friendly);
-        return;
+      }
+      const nonProductPhoto =
+        !!imageContent &&
+        !imageContent.isProductLikely &&
+        (imageContent.contentType === "person_or_selfie" ||
+          imageContent.contentType === "random_object" ||
+          imageContent.contentType === "document" ||
+          imageContent.contentType === "chat_screenshot" ||
+          imageContent.contentType === "unclear");
+
+      if (nonProductPhoto && !captionHasContent && imageContent) {
+        logger.info(
+          {
+            contentType: imageContent.contentType,
+            confidence: imageContent.confidence,
+            shortDescription: imageContent.shortDescription?.slice(0, 80),
+          },
+          "Single-image fallback: photo is not a product — skipping forced catalog match",
+        );
+        // Chat screenshots and documents may be shop-related ("amar previous
+        // chat", "ei doc dekhen") — let the conversational LLM handle those
+        // naturally instead of a templated rejection. Only the truly
+        // off-topic categories (selfie, random object, unclear) get a short
+        // definitive reply.
+        const handHandledHere =
+          imageContent.contentType === "person_or_selfie" ||
+          imageContent.contentType === "random_object" ||
+          imageContent.contentType === "unclear";
+        if (handHandledHere) {
+          // ONE short, definitive reply. No instructions, no lecturing,
+          // and no internal vocabulary like "catalog" — the customer just
+          // needs to know the item isn't available.
+          const friendly = "Eta amader kache nei 🙂 Apni ki khujchen?";
+          await sendMessengerText({
+            pageAccessToken,
+            psid: params.psid,
+            text: friendly,
+            within24hWindow: within24h,
+          });
+          await logAssistantTurn(conversationId, friendly);
+          return;
+        }
+        // For chat_screenshot / document we DON'T short-circuit — fall
+        // through to the LLM, which can read the visible text and respond
+        // contextually (e.g. acknowledging a previous order screenshot or
+        // answering a question shown in a chat clip).
       } else {
         const catalogMatchCaption = useVisionCaption
           ? [trimmed, `Jersey in photo (identified): ${visionNames.join(", ")}`].filter(Boolean).join(" | ")
@@ -5176,6 +5232,76 @@ export async function confirmManualPayment(args: {
 
 type OrderWithTenant = Prisma.OrderGetPayload<{ include: { tenant: true } }>;
 
+/**
+ * Ship a copy of the just-generated invoice PDF to the tenant's own Telegram
+ * chat so the merchant has a record without opening the dashboard. Pure
+ * best-effort: returns silently when Telegram isn't configured for the
+ * tenant or when the upload fails.
+ *
+ * Caption is one short line — the upload is the artifact, the line is the
+ * scannable summary in the Telegram timeline.
+ */
+async function sendInvoicePdfToTenantTelegram(args: {
+  settings: ReturnType<typeof parseTenantSettings>;
+  order: OrderWithTenant;
+  paidVia: "SSLCOMMERZ" | "BKASH_MANUAL" | "NAGAD_MANUAL";
+  invoiceFilePath: string;
+  invoicePublicUrl: string;
+  items: ReturnType<typeof normalizeOrderItems>;
+  structured: StructuredOrder;
+}): Promise<void> {
+  const tg = args.settings.telegram;
+  if (!tg?.enabled || !tg.botToken?.trim() || !tg.chatId?.trim()) return;
+
+  const orderShort = args.order.id.slice(0, 12);
+  const amount = `${args.order.totalAmount?.toString() ?? "0"} ${args.order.currency ?? "BDT"}`;
+  const customerName = String(args.structured.name ?? "").trim();
+  const customerPhone = String(args.structured.phone ?? "").trim();
+  const itemsLine =
+    args.items.length > 0
+      ? args.items
+          .slice(0, 3)
+          .map((it) => `${it.product}${it.size ? ` (${it.size})` : ""} x${it.quantity}`)
+          .join(", ") + (args.items.length > 3 ? ` +${args.items.length - 3} more` : "")
+      : "";
+
+  const captionLines = [
+    "Invoice — payment received",
+    `Order: ${orderShort}`,
+    `Rail: ${args.paidVia}`,
+    `Amount: ${amount}`,
+    customerName ? `Customer: ${customerName}${customerPhone ? ` (${customerPhone})` : ""}` : "",
+    itemsLine ? `Items: ${itemsLine}` : "",
+  ].filter(Boolean);
+  const caption = captionLines.join("\n");
+
+  await sendTelegramDocument({
+    botToken: tg.botToken.trim(),
+    chatId: tg.chatId.trim(),
+    filePath: args.invoiceFilePath,
+    filename: `invoice-${orderShort}.pdf`,
+    caption,
+  }).catch(async (e) => {
+    // If the file upload fails for any reason (network, quota, oversize),
+    // fall back to a text message with the public invoice URL so the owner
+    // still gets the receipt.
+    logger.warn(
+      { e: String(e), orderId: args.order.id },
+      "Telegram sendDocument failed — falling back to URL",
+    );
+    await sendTelegramMessage({
+      botToken: tg.botToken!.trim(),
+      chatId: tg.chatId!.trim(),
+      text: `${caption}\nInvoice: ${args.invoicePublicUrl}`,
+    }).catch((err) =>
+      logger.warn(
+        { e: String(err), orderId: args.order.id },
+        "Telegram fallback URL message also failed",
+      ),
+    );
+  });
+}
+
 async function runPostPaymentPipeline(opts: {
   order: OrderWithTenant;
   paidVia: "SSLCOMMERZ" | "BKASH_MANUAL" | "NAGAD_MANUAL";
@@ -5445,6 +5571,22 @@ async function runPostPaymentPipeline(opts: {
           within24hWindow: within24h,
         }).catch(() => undefined);
       });
+
+      // Ship a copy of the invoice to the tenant's Telegram bot so the owner
+      // has a clean record without opening the dashboard. Best-effort — if
+      // Telegram isn't configured or the upload fails, the customer-facing
+      // path above is unaffected.
+      await sendInvoicePdfToTenantTelegram({
+        settings,
+        order,
+        paidVia,
+        invoiceFilePath: invoice.filePath,
+        invoicePublicUrl: invoice.publicUrl,
+        items,
+        structured,
+      }).catch((e) =>
+        logger.warn({ e: String(e), orderId: order.id }, "Telegram invoice copy failed"),
+      );
     }
   }
 }

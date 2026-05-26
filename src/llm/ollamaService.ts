@@ -2,6 +2,7 @@ import axios from "axios";
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { catalogProductMatchSchema } from "../types/catalog-match.js";
+import { imageContentSchema, type ImageContent } from "../types/image-content.js";
 import { jerseyPhotoIdentifySchema, type JerseyPhotoIdentify } from "../types/jersey-vision.js";
 import { structuredOrderSchema, type StructuredOrder } from "../types/order-extraction.js";
 
@@ -343,6 +344,98 @@ export async function extractOrderFromTextAndImages(
     return await extractOrderWithVisionOnce(hint, b64);
   } catch (e) {
     logger.error({ e }, "Ollama vision extract failed");
+    return null;
+  }
+}
+
+const IMAGE_CONTENT_CLASSIFY_SYSTEM = `You are a precision image-content classifier for a Bangladeshi Messenger commerce shop. Be CONSERVATIVE — when in doubt, output a less specific category and lower confidence rather than guess.
+
+You receive ONE OR MORE photos the customer sent (image/jpeg, image/png, etc.). The shop sells SOMETHING — but you do NOT know what. The catalog could be jerseys today, shoes tomorrow, electronics next month. Do NOT assume the photo is a jersey or any particular product. Look at what is ACTUALLY visible in the image and pick the best category.
+
+Categories (pick exactly ONE):
+  - "product"             : the photo clearly shows a saleable item — clothing, footwear, accessory, electronics, home good, food, beauty product, anything a shop might sell. Both bare product shots and a model/mannequin wearing/holding the product count.
+  - "payment_screenshot"  : bKash / Nagad / Rocket / Upay / bank app screen showing Send Money / Cash Out / payment success / transaction details / Txn ID / SMS receipt with amount. SSLCommerz / merchant checkout confirmation.
+  - "chat_screenshot"     : screenshot of a Messenger / WhatsApp / SMS / Imo conversation that is NOT a payment proof. Customer sharing a friend's order, a previous chat, a competitor's screenshot, etc.
+  - "person_or_selfie"    : selfie / portrait / group photo where the SUBJECT is clearly the person, not a product they are modelling. A friend smiling at the camera with no garment intentionally shown for sale.
+  - "document"            : NID, business document, paper invoice, ID card, certificate, official paper.
+  - "random_object"       : pet, food (unless food is clearly the shop's product), scenery, sky, meme, screenshot of a website, anything else that's clearly not a product.
+  - "unclear"             : too dark / blurry / tiny crop / heavily compressed to classify confidently.
+
+Rules:
+- "isProductLikely" must be TRUE only when contentType === "product".
+- A person modelling an obvious garment intended to be sold (clearly arranged product photography, hanger photo, mannequin) IS "product".
+- A casual selfie where the person happens to be wearing clothes is "person_or_selfie" — not "product" — UNLESS the clothing is clearly being shown off for purchase.
+- "shortDescription" — 5 to 15 words neutrally describing what is in the image. No marketing fluff. Examples:
+    "A red and black football jersey on a hanger."
+    "bKash send money success screen, amount 1290 BDT."
+    "Selfie of a smiling young woman in a casual top."
+    "A pair of brown leather sneakers, side view."
+- "productCategory" — broad category when contentType === "product": clothing / footwear / accessory / electronics / beauty / home / food / kids / sports / other. Omit when not product.
+- "confidence" — high only when ALL discriminators agree. Drop to medium / low when in doubt.
+
+Output ONE JSON object only:
+{"contentType":"product|payment_screenshot|chat_screenshot|person_or_selfie|document|random_object|unclear","isProductLikely":bool,"confidence":"high|medium|low","shortDescription":"...","productCategory":"clothing|footwear|accessory|electronics|beauty|home|food|kids|sports|other"}
+
+No markdown, no extra commentary.`;
+
+/**
+ * Domain-agnostic image classifier. Decides whether the customer photo is
+ * something the catalog matcher should look at, plus a short neutral
+ * description that callers can use as caption enrichment when the customer
+ * sent no text. Replaces the old jersey-only `not_jersey` gate so the
+ * framework no longer assumes any specific catalog domain.
+ *
+ * On Ollama / network failure returns null — callers must treat this as
+ * "vision unavailable" (do not auto-match) rather than as "looks like a
+ * product" (which would re-introduce false positives).
+ */
+export async function classifyImageContent(
+  imagesBase64: string[],
+  caption?: string,
+): Promise<ImageContent | null> {
+  const capped = imagesBase64.filter((s) => s.length > 32).slice(0, 3);
+  if (capped.length === 0) return null;
+  const userText = caption?.trim()
+    ? `Customer also wrote: """${caption.trim().slice(0, 800)}"""\nClassify the image(s) — let the text inform but never override what is actually visible.`
+    : "Customer sent only image(s). Classify what is visible.";
+  try {
+    const res = await axios.post(
+      `${config.ollamaBaseUrl.replace(/\/$/, "")}/api/chat`,
+      {
+        model: config.ollamaModel,
+        messages: [
+          { role: "system", content: IMAGE_CONTENT_CLASSIFY_SYSTEM },
+          { role: "user", content: userText, images: capped },
+        ],
+        stream: false,
+        format: "json",
+        options: { temperature: 0.05 },
+      },
+      { timeout: Math.min(config.ollamaTimeoutMs, 90_000) },
+    );
+    const content = res.data?.message?.content;
+    const parsed = parseJsonObjectFromLlmContent(content);
+    const out = imageContentSchema.safeParse(parsed);
+    if (!out.success) {
+      logger.warn(
+        { errors: out.error.issues, preview: typeof content === "string" ? content.slice(0, 160) : null },
+        "classifyImageContent: schema parse failed",
+      );
+      return null;
+    }
+    logger.info(
+      {
+        contentType: out.data.contentType,
+        isProductLikely: out.data.isProductLikely,
+        confidence: out.data.confidence,
+        productCategory: out.data.productCategory,
+        shortDescription: out.data.shortDescription?.slice(0, 80),
+      },
+      "Image content classification",
+    );
+    return out.data;
+  } catch (e) {
+    logger.warn({ e: String(e) }, "classifyImageContent failed");
     return null;
   }
 }

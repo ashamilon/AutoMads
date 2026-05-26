@@ -199,6 +199,34 @@ export const sessionTools: ToolDef[] = [
         when: "Flush the current in-memory snapshot to disk verbatim before a risky downstream step",
         call: { tool: "save_session_state", args: {} },
       },
+      {
+        when: "Customer says 'bkash e pay korbo' — record the chosen payment rail before calling confirm_order",
+        call: {
+          tool: "save_session_state",
+          args: { confirmed_information: { order: { payment_method: "bkash" } } },
+        },
+      },
+      {
+        when: "Customer chose Nagad",
+        call: {
+          tool: "save_session_state",
+          args: { confirmed_information: { order: { payment_method: "nagad" } } },
+        },
+      },
+      {
+        when: "Customer chose SSLCommerz / Card / Net Banking",
+        call: {
+          tool: "save_session_state",
+          args: { confirmed_information: { order: { payment_method: "sslcommerz" } } },
+        },
+      },
+      {
+        when: "Customer chose Cash on Delivery",
+        call: {
+          tool: "save_session_state",
+          args: { confirmed_information: { order: { payment_method: "cod" } } },
+        },
+      },
     ],
     handler: async (rawArgs, ctx) => {
       const conversationId = ctx.input.conversationId;
