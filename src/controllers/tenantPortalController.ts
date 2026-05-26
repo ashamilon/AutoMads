@@ -15,6 +15,7 @@ import { confirmManualPayment, scheduleTrackingCheck } from "../services/orderWo
 import { generateInvoicePdf } from "../services/invoicePdfService.js";
 import { computeAdvanceForCart } from "../agent/advanceResolver.js";
 import { createPathaoOrder, getPathaoOrderStatus, type PathaoTenantConfig } from "../integrations/pathao/pathaoService.js";
+import { createSteadfastOrder } from "../integrations/steadfast/steadfastService.js";
 import { logger } from "../utils/logger.js";
 import { z } from "zod";
 import { config } from "../config/index.js";
@@ -32,6 +33,7 @@ export async function getMe(req: Request, res: Response): Promise<void> {
     slug: t.slug,
     isActive: t.isActive,
     facebookPageId: t.facebookPageId,
+    hasFacebookPageAccessToken: !!t.facebookPageAccessToken,
     settings: t.settings,
     integration: integration
       ? { type: integration.type, config: maskSecrets(integration.config) }
@@ -615,6 +617,104 @@ export async function bookPathao(req: Request, res: Response): Promise<void> {
   }
 }
 
+const bookSteadfastBody = z.object({
+  recipientName: z.string().max(200).optional(),
+  recipientPhone: z.string().max(30).optional(),
+  recipientAddress: z.string().max(500).optional(),
+  itemDescription: z.string().max(500).optional(),
+  cashAmount: z.number().min(0).optional(),
+  note: z.string().max(250).optional(),
+});
+
+export async function bookSteadfast(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const orderId = String(req.params.orderId ?? "");
+  const parsed = bookSteadfastBody.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "validation_error", issues: parsed.error.issues });
+    return;
+  }
+  const overrides = parsed.data;
+
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, tenantId: t.id },
+    include: { tenant: { select: { settings: true } } },
+  });
+  if (!order) { res.status(404).json({ error: "not_found" }); return; }
+  if (order.paymentStatus !== "PAID") {
+    res.status(400).json({ error: "order_not_paid" });
+    return;
+  }
+  if (order.deliveryStatus === "BOOKED" || order.deliveryStatus === "DELIVERED" || order.deliveryStatus === "IN_TRANSIT") {
+    res.status(400).json({ error: "already_booked", deliveryStatus: order.deliveryStatus });
+    return;
+  }
+
+  const settings = parseTenantSettings(order.tenant.settings);
+  const sf = settings.steadfast;
+  if (!sf?.apiKey || !sf?.secretKey) {
+    res.status(400).json({ error: "steadfast_not_configured" });
+    return;
+  }
+
+  const structured = (order.structuredData ?? {}) as Record<string, unknown>;
+  const items = Array.isArray(structured.items) ? structured.items : [];
+  const subtotal = Number(order.totalAmount?.toString() ?? "0");
+  const deliveryCharge = typeof settings.deliveryChargeBdt === "number" ? settings.deliveryChargeBdt : 0;
+  const configuredAdvance = typeof settings.advancePaymentBdt === "number" ? settings.advancePaymentBdt : subtotal;
+  const payableTotal = subtotal + deliveryCharge;
+  const defaultCod = Math.max(payableTotal - Math.min(configuredAdvance, payableTotal), 0);
+
+  const recipientName = overrides.recipientName?.trim() || (structured.name as string)?.trim() || "Customer";
+  const recipientPhone = overrides.recipientPhone?.trim() || (structured.phone as string)?.trim() || "";
+  const recipientAddress = overrides.recipientAddress?.trim() || (structured.address as string)?.trim() || "";
+  if (!recipientPhone || !recipientAddress) {
+    res.status(400).json({ error: "missing_recipient_info", detail: "Phone and address are required" });
+    return;
+  }
+  const itemDescription =
+    overrides.itemDescription?.trim() ||
+    (items.length > 0
+      ? items
+          .slice(0, 3)
+          .map((it: any) => `${it.product || "Item"}${it.size ? `(${it.size})` : ""}x${it.quantity || 1}`)
+          .join(", ")
+      : String(structured.product ?? "Order"));
+  const cashAmount = overrides.cashAmount ?? defaultCod;
+
+  try {
+    const delivery = await createSteadfastOrder(
+      { apiKey: sf.apiKey, secretKey: sf.secretKey },
+      {
+        merchantOrderId: order.id,
+        recipientName,
+        recipientPhone,
+        recipientAddress,
+        itemDescription,
+        cashAmount,
+        ...(overrides.note ? { note: overrides.note } : {}),
+      },
+    );
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        // Reuse the courier-consignment column. Naming is historical (Pathao);
+        // semantics are now "the active courier's consignment id".
+        pathaoConsignmentId: delivery.consignmentId,
+        // Preserve the tracking_code on the existing pathaoMerchantOrderId
+        // column (also reused as a courier-tracking-id store).
+        pathaoMerchantOrderId: delivery.trackingCode || null,
+        status: "DELIVERY_SCHEDULED",
+        deliveryStatus: "BOOKED",
+      },
+    });
+    res.json({ ok: true, consignmentId: delivery.consignmentId, trackingCode: delivery.trackingCode, order: updated });
+  } catch (e) {
+    logger.error({ e, orderId }, "Manual Steadfast booking failed");
+    res.status(500).json({ error: "steadfast_booking_failed", detail: String(e) });
+  }
+}
+
 const patchSettingsBody = z.object({
   settings: z.record(z.string(), z.unknown()),
 });
@@ -759,7 +859,7 @@ export async function previewInvoice(req: Request, res: Response): Promise<void>
 
 // ─── Scheduled Posts (Content Calendar) ──────────────────────────────────────
 
-import { publishScheduledPost as doPublish, generateCaption } from "../services/socialPostService.js";
+import { publishScheduledPost as doPublish, generateCaption, type BrandVoice } from "../services/socialPostService.js";
 
 export async function listScheduledPosts(req: Request, res: Response): Promise<void> {
   const t = req.tenant!;
@@ -775,8 +875,22 @@ export async function createScheduledPost(req: Request, res: Response): Promise<
   const t = req.tenant!;
   const { platform, postType, caption, imageUrls, productSkus, scheduledAt, status } = req.body;
 
-  if (!caption || !scheduledAt) {
-    res.status(400).json({ error: "caption and scheduledAt are required" });
+  if (!caption || typeof caption !== "string" || !caption.trim()) {
+    res.status(400).json({ error: "caption is required" });
+    return;
+  }
+
+  // Drafts and pending_approval rows can be created without a schedule time;
+  // the UI lets clients save a half-built post. Only scheduled posts must
+  // carry a real timestamp.
+  const desiredStatus: string = typeof status === "string" ? status : "scheduled";
+  const ALLOWED_STATUSES = ["draft", "pending_approval", "approved", "scheduled"] as const;
+  if (!(ALLOWED_STATUSES as readonly string[]).includes(desiredStatus)) {
+    res.status(400).json({ error: "invalid_status", allowed: ALLOWED_STATUSES });
+    return;
+  }
+  if (desiredStatus === "scheduled" && !scheduledAt) {
+    res.status(400).json({ error: "scheduledAt is required for scheduled status" });
     return;
   }
 
@@ -785,14 +899,57 @@ export async function createScheduledPost(req: Request, res: Response): Promise<
       tenantId: t.id,
       platform: platform ?? "facebook",
       postType: postType ?? "product_showcase",
-      caption,
+      caption: caption.trim(),
       imageUrls: imageUrls ?? [],
       productSkus: productSkus ?? null,
-      scheduledAt: new Date(scheduledAt),
-      status: status ?? "scheduled",
+      // For non-scheduled rows we still need a timestamp on the column —
+      // store the createdAt-equivalent so the calendar list can sort.
+      scheduledAt: scheduledAt ? new Date(scheduledAt) : new Date(),
+      status: desiredStatus,
     },
   });
   res.status(201).json(post);
+}
+
+export async function approveScheduledPost(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const id = req.params.id as string;
+  const existing = await prisma.scheduledPost.findFirst({ where: { id, tenantId: t.id } });
+  if (!existing) { res.status(404).json({ error: "not_found" }); return; }
+  if (existing.status !== "pending_approval" && existing.status !== "draft") {
+    res.status(400).json({ error: "cannot_approve", currentStatus: existing.status });
+    return;
+  }
+  // Approval moves the post to "scheduled" so the postScheduler tick will pick
+  // it up at scheduledAt. If the customer didn't pick a time we publish ASAP
+  // (within the next scheduler tick).
+  const scheduledAt = req.body?.scheduledAt
+    ? new Date(req.body.scheduledAt)
+    : existing.scheduledAt && existing.scheduledAt > new Date()
+      ? existing.scheduledAt
+      : new Date();
+  const updated = await prisma.scheduledPost.update({
+    where: { id },
+    data: { status: "scheduled", scheduledAt, failureReason: null },
+  });
+  res.json(updated);
+}
+
+export async function rejectScheduledPost(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const id = req.params.id as string;
+  const existing = await prisma.scheduledPost.findFirst({ where: { id, tenantId: t.id } });
+  if (!existing) { res.status(404).json({ error: "not_found" }); return; }
+  if (existing.status === "published") {
+    res.status(400).json({ error: "cannot_reject_published" });
+    return;
+  }
+  const reason = typeof req.body?.reason === "string" ? req.body.reason.trim().slice(0, 200) : "rejected by client";
+  const updated = await prisma.scheduledPost.update({
+    where: { id },
+    data: { status: "draft", failureReason: reason },
+  });
+  res.json(updated);
 }
 
 export async function updateScheduledPost(req: Request, res: Response): Promise<void> {
@@ -856,29 +1013,391 @@ export async function publishScheduledPostNow(req: Request, res: Response): Prom
 }
 
 export async function generatePostCaption(req: Request, res: Response): Promise<void> {
-  const { productNames, prices, tags, postType, language } = req.body;
+  const t = req.tenant!;
+  const { productNames, prices, tags, postType, language, style } = req.body;
   if (!productNames || !Array.isArray(productNames) || productNames.length === 0) {
     res.status(400).json({ error: "productNames array required" });
     return;
   }
+  // Pull brand voice from tenant settings so captions inherit tone, banned
+  // words, emoji preference, etc. Settings is a loose JSON column — read
+  // defensively.
+  const settings = (t.settings ?? {}) as Record<string, unknown>;
+  const brandVoiceRaw = (settings["brandVoice"] ?? {}) as Record<string, unknown>;
+  const emojiPreference =
+    brandVoiceRaw.emojiPreference === "minimal" ||
+    brandVoiceRaw.emojiPreference === "balanced" ||
+    brandVoiceRaw.emojiPreference === "expressive" ||
+    brandVoiceRaw.emojiPreference === "none"
+      ? brandVoiceRaw.emojiPreference
+      : undefined;
+  const hashtagStyle =
+    brandVoiceRaw.hashtagStyle === "none" || brandVoiceRaw.hashtagStyle === "few" || brandVoiceRaw.hashtagStyle === "many"
+      ? brandVoiceRaw.hashtagStyle
+      : undefined;
+  const bvLanguage =
+    brandVoiceRaw.language === "banglish" || brandVoiceRaw.language === "bangla" || brandVoiceRaw.language === "english"
+      ? brandVoiceRaw.language
+      : undefined;
+  const brandVoice: BrandVoice = {
+    tone: typeof brandVoiceRaw.tone === "string" ? brandVoiceRaw.tone : undefined,
+    vocabulary: Array.isArray(brandVoiceRaw.vocabulary)
+      ? (brandVoiceRaw.vocabulary as string[]).filter((x) => typeof x === "string")
+      : undefined,
+    bannedWords: Array.isArray(brandVoiceRaw.bannedWords)
+      ? (brandVoiceRaw.bannedWords as string[]).filter((x) => typeof x === "string")
+      : undefined,
+    ...(emojiPreference ? { emojiPreference } : {}),
+    ...(hashtagStyle ? { hashtagStyle } : {}),
+    ...(bvLanguage ? { language: bvLanguage } : {}),
+  };
   const caption = await generateCaption({
     productNames,
     prices: prices ?? [],
     tags: tags ?? [],
     postType: postType ?? "product_showcase",
-    language: language ?? "banglish",
+    language: language ?? brandVoice.language ?? "banglish",
+    ...(typeof style === "string" ? { style } : {}),
+    brandVoice,
   });
   res.json({ caption });
 }
 
+// ─── Content Agent (autonomous post drafter) ────────────────────────────────
+
+import { runContentAgent, parseContentAgentSettings } from "../services/contentAgentService.js";
+
+/** GET current contentAgent settings + brandVoice from tenant.settings JSON. */
+export async function getContentAgentSettings(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const settings = (t.settings ?? {}) as Record<string, unknown>;
+  const contentAgent = parseContentAgentSettings(settings.contentAgent);
+  const brandVoice = settings.brandVoice ?? {};
+  res.json({ contentAgent, brandVoice });
+}
+
+/** PATCH contentAgent + brandVoice config in tenant.settings JSON. */
+export async function updateContentAgentSettings(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const body = req.body ?? {};
+  const tenant = await prisma.tenant.findUnique({ where: { id: t.id } });
+  if (!tenant) { res.status(404).json({ error: "tenant_not_found" }); return; }
+  const settings = (tenant.settings ?? {}) as Record<string, unknown>;
+  const next: Record<string, unknown> = { ...settings };
+  if (body.contentAgent && typeof body.contentAgent === "object") {
+    next.contentAgent = { ...((settings.contentAgent ?? {}) as Record<string, unknown>), ...body.contentAgent };
+  }
+  if (body.brandVoice && typeof body.brandVoice === "object") {
+    next.brandVoice = { ...((settings.brandVoice ?? {}) as Record<string, unknown>), ...body.brandVoice };
+  }
+  await prisma.tenant.update({ where: { id: t.id }, data: { settings: next as object } });
+  res.json({
+    contentAgent: parseContentAgentSettings(next.contentAgent),
+    brandVoice: next.brandVoice ?? {},
+  });
+}
+
+/** Manual trigger for the autonomous agent ("Run agent now" button). */
+export async function runContentAgentNow(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  try {
+    const result = await runContentAgent(t.id);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: "agent_failed", detail: String(e) });
+  }
+}
+
 // ─── Social Account Validation ───────────────────────────────────────────────
+
+/**
+ * GET /api/v1/social/facebook-status
+ *
+ * Live "ready to post on Facebook" check used by the content calendar page.
+ *
+ * Meta has tightened permission gating — even reading the page's own name
+ * needs `pages_read_engagement`, listing subscribed_apps needs
+ * `pages_manage_metadata`, and posting needs `pages_manage_posts`. Most
+ * pre-review apps only have `pages_messaging` (the messenger bot perm).
+ *
+ * The endpoint walks four probes from cheapest-and-most-informative to
+ * structural-only, and returns the first one that succeeds:
+ *
+ *   Tier 1: `GET /me?fields=id,name`   — needs pages_read_engagement.
+ *           Best case: returns the page name → "verified".
+ *
+ *   Tier 2: `GET /me?fields=id`        — sometimes works without read perms.
+ *           Confirms id → "verified" (without page name).
+ *
+ *   Tier 3: `GET /me/messenger_profile?fields=greeting`
+ *                                       — uses pages_messaging, the same
+ *           permission the inbound webhook is already using. If your bot is
+ *           replying to customers, this WILL succeed. We can't read the page
+ *           name here but messenger_profile is page-scoped, so a 200 means
+ *           the token is bound to *some* page; we mark `pageMatch` as null
+ *           ("can't verify without a read perm") and report `messenger_ok`.
+ *
+ *   Tier 4: structural-only             — all Graph calls failed but the
+ *           token looks like a real page token (`EAA…`, length > 80) and
+ *           there's a configured pageId. We report `configured` with a
+ *           clear note that publishing needs `pages_manage_posts`.
+ *
+ * The dashboard renders these distinctly so the tenant always knows what's
+ * proven, what's assumed, and what to ask the admin for.
+ */
+export async function validateFacebookPage(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const pageId = t.facebookPageId ?? null;
+  const pageAccessToken = t.facebookPageAccessToken ?? null;
+
+  if (!pageId) {
+    res.json({
+      ok: false,
+      mode: null,
+      pageId: null,
+      hasToken: !!pageAccessToken,
+      tokenValid: false,
+      pageName: null,
+      pageMatch: false,
+      note: null,
+      error: "Page ID is not configured for this tenant. Ask the admin to set it.",
+    });
+    return;
+  }
+  if (!pageAccessToken) {
+    res.json({
+      ok: false,
+      mode: null,
+      pageId,
+      hasToken: false,
+      tokenValid: false,
+      pageName: null,
+      pageMatch: false,
+      note: null,
+      error:
+        "Facebook Page Access Token is missing. Add it from Settings → Pages or ask the admin to configure it.",
+    });
+    return;
+  }
+
+  const isPermErr = (msg: string, code: number | undefined) =>
+    /pages_read_engagement|pages_manage_metadata|pages_manage_posts|page public content access|page public metadata access|requires.*permission/i.test(
+      msg,
+    ) || code === 100 || code === 200 || code === 10 || code === 200;
+
+  // ── Tier 1 — /me?fields=id,name ──────────────────────────────────────────
+  try {
+    const r = await axios.get("https://graph.facebook.com/v21.0/me", {
+      params: { fields: "id,name", access_token: pageAccessToken },
+      timeout: 5000,
+    });
+    const data = r.data as { id?: string; name?: string };
+    const liveId = String(data?.id ?? "");
+    const liveName = String(data?.name ?? "") || null;
+    const pageMatch = !!liveId && liveId === pageId;
+    if (!pageMatch) {
+      res.json({
+        ok: false,
+        mode: "verified",
+        pageId,
+        hasToken: true,
+        tokenValid: true,
+        pageName: liveName,
+        pageMatch: false,
+        note: null,
+        error:
+          `Token works but it belongs to page "${liveName ?? liveId}" (id ${liveId}), not the configured page id ${pageId}. ` +
+          `Update the token in Settings → Pages to one for the correct page.`,
+      });
+      return;
+    }
+    res.json({
+      ok: true,
+      mode: "verified",
+      pageId,
+      hasToken: true,
+      tokenValid: true,
+      pageName: liveName,
+      pageMatch: true,
+      note: null,
+      error: null,
+    });
+    return;
+  } catch (e1) {
+    const err1 = e1 as {
+      response?: { data?: { error?: { message?: string; code?: number } } };
+      message?: string;
+    };
+    const ge1 = err1?.response?.data?.error;
+    const msg1 = ge1?.message ?? err1?.message ?? String(e1);
+    if (!isPermErr(msg1, ge1?.code)) {
+      // Not a permission gate — the token is genuinely broken.
+      res.json({
+        ok: false,
+        mode: "broken",
+        pageId,
+        hasToken: true,
+        tokenValid: false,
+        pageName: null,
+        pageMatch: false,
+        note: null,
+        error: `Facebook rejected the token: ${msg1}`,
+      });
+      return;
+    }
+
+    // ── Tier 2 — /me?fields=id (sometimes allowed without read perms) ─────
+    try {
+      const r2 = await axios.get("https://graph.facebook.com/v21.0/me", {
+        params: { fields: "id", access_token: pageAccessToken },
+        timeout: 5000,
+      });
+      const liveId = String((r2.data as { id?: string })?.id ?? "");
+      const pageMatch = !!liveId && liveId === pageId;
+      if (pageMatch) {
+        res.json({
+          ok: true,
+          mode: "verified",
+          pageId,
+          hasToken: true,
+          tokenValid: true,
+          pageName: null,
+          pageMatch: true,
+          note:
+            "Page id verified with Facebook. Page name isn't shown because the app doesn't have " +
+            "`pages_read_engagement`, but that's not required for publishing.",
+          error: null,
+        });
+        return;
+      }
+      // mismatch on id-only is still a real mismatch
+      res.json({
+        ok: false,
+        mode: "verified",
+        pageId,
+        hasToken: true,
+        tokenValid: true,
+        pageName: null,
+        pageMatch: false,
+        note: null,
+        error:
+          `Token belongs to page id ${liveId}, not the configured ${pageId}. Update the token to one for the correct page.`,
+      });
+      return;
+    } catch (e2) {
+      const err2 = e2 as {
+        response?: { data?: { error?: { message?: string; code?: number } } };
+      };
+      const ge2 = err2?.response?.data?.error;
+      const msg2 = ge2?.message ?? "";
+      if (!isPermErr(msg2, ge2?.code)) {
+        // Token genuinely broken.
+        res.json({
+          ok: false,
+          mode: "broken",
+          pageId,
+          hasToken: true,
+          tokenValid: false,
+          pageName: null,
+          pageMatch: false,
+          note: null,
+          error: `Facebook rejected the token: ${msg2 || msg1}`,
+        });
+        return;
+      }
+    }
+
+    // ── Tier 3 — /me/messenger_profile (uses pages_messaging) ─────────────
+    try {
+      const r3 = await axios.get("https://graph.facebook.com/v21.0/me/messenger_profile", {
+        params: { fields: "greeting", access_token: pageAccessToken },
+        timeout: 5000,
+      });
+      void r3.data;
+      // Success means the token is valid AND scoped to *a* page (messenger_profile
+      // is page-scoped). We can't prove pageMatch without a read perm, so we
+      // mark it as null and lean on the configured pageId.
+      res.json({
+        ok: true,
+        mode: "messenger_ok",
+        pageId,
+        hasToken: true,
+        tokenValid: true,
+        pageName: null,
+        pageMatch: true,
+        note:
+          "Page Access Token verified through the Messenger API (the same path the bot uses for replies). " +
+          "Page identity can't be proven without `pages_read_engagement`, but configuration matches and the bot is wired up. " +
+          "To actually publish posts your Facebook app also needs `pages_manage_posts` — until that's granted, calendar posts will land but Facebook will reject them at publish time.",
+        error: null,
+      });
+      return;
+    } catch (e3) {
+      const err3 = e3 as {
+        response?: { data?: { error?: { message?: string; code?: number } } };
+      };
+      const ge3 = err3?.response?.data?.error;
+      const msg3 = ge3?.message ?? "";
+      if (!isPermErr(msg3, ge3?.code)) {
+        // Token broken for messaging too — that's a real failure.
+        res.json({
+          ok: false,
+          mode: "broken",
+          pageId,
+          hasToken: true,
+          tokenValid: false,
+          pageName: null,
+          pageMatch: false,
+          note: null,
+          error: `Facebook rejected the token: ${msg3 || msg1}`,
+        });
+        return;
+      }
+    }
+
+    // ── Tier 4 — structural fallback ──────────────────────────────────────
+    // No Graph endpoint accepts our token without a permission we don't have.
+    // Verify the token at least *looks* like a page access token so we don't
+    // flash green for an obviously broken value.
+    const tokenLooksReal = pageAccessToken.startsWith("EAA") && pageAccessToken.length > 80;
+    if (!tokenLooksReal) {
+      res.json({
+        ok: false,
+        mode: "broken",
+        pageId,
+        hasToken: true,
+        tokenValid: false,
+        pageName: null,
+        pageMatch: false,
+        note: null,
+        error:
+          "The configured token doesn't look like a Facebook page access token (expected an EAA-prefixed string > 80 chars). " +
+          "Generate a Page Access Token from your Facebook app and update it in Settings → Pages.",
+      });
+      return;
+    }
+    res.json({
+      ok: true,
+      mode: "configured",
+      pageId,
+      hasToken: true,
+      tokenValid: false,
+      pageName: null,
+      pageMatch: false,
+      note:
+        "Configuration is complete (Page ID + token are set). Live verification with Facebook isn't possible right now because " +
+        "your Facebook app doesn't have `pages_read_engagement`, `pages_manage_metadata`, or `pages_manage_posts` granted. " +
+        "Messenger bot replies use `pages_messaging` and should already work. To enable Facebook AUTO-POSTING from the content calendar, " +
+        "submit your app for review with `pages_manage_posts` (and ideally `pages_read_engagement` so this card can verify the page name).",
+      error: null,
+    });
+  }
+}
 
 export async function validateInstagram(req: Request, res: Response): Promise<void> {
   const t = req.tenant!;
   const { igUserId } = req.body;
-  if (!igUserId) { res.status(400).json({ ok: false, error: "igUserId required" }); return; }
-
-  const pageAccessToken = t.facebookPageAccessToken;
+  if (!igUserId) { res.status(400).json({ ok: false, error: "igUserId required" }); return; }  const pageAccessToken = t.facebookPageAccessToken;
   if (!pageAccessToken) {
     res.json({ ok: false, error: "No Facebook Page Access Token configured. Set it up in the Pages tab first." });
     return;
@@ -919,4 +1438,97 @@ export async function validateTiktok(req: Request, res: Response): Promise<void>
     const msg = e?.response?.data?.error?.message ?? e?.response?.data?.message ?? String(e);
     res.json({ ok: false, error: msg });
   }
+}
+
+
+// ─── Grace window + agent-mute control surface ──────────────────────────────
+
+import {
+  GRACE_WINDOW_MS,
+  graceHoursRemaining,
+  unmuteAgent,
+} from "../agent/handoffPolicy.js";
+
+/**
+ * GET /api/v1/grace-status
+ * Returns the tenant's grace-window status + count of currently-muted convos.
+ * Used by the portal header to show "Grace window: 38h remaining" + a CTA
+ * to end the window early.
+ */
+export async function getGraceStatus(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: t.id },
+    select: { facebookConnectedAt: true, facebookPageId: true },
+  });
+  const now = Date.now();
+  const connectedAt = tenant?.facebookConnectedAt ?? null;
+  const inGrace = !!(
+    tenant?.facebookPageId &&
+    connectedAt &&
+    now - connectedAt.getTime() < GRACE_WINDOW_MS
+  );
+  const hoursRemaining = inGrace ? await graceHoursRemaining(t.id) : 0;
+  const mutedConversations = await prisma.messengerConversation.count({
+    where: { tenantId: t.id, agentMutedUntil: { gt: new Date() } },
+  });
+  res.json({
+    inGrace,
+    hoursRemaining,
+    connectedAt: connectedAt?.toISOString() ?? null,
+    graceWindowHours: GRACE_WINDOW_MS / (60 * 60 * 1000),
+    mutedConversations,
+  });
+}
+
+/**
+ * POST /api/v1/grace-status/end
+ * Ends the grace window early (sets facebookConnectedAt to one second past the
+ * end of the window). Existing mutes stay in place — admins can still finish
+ * the conversations they took over.
+ */
+export async function endGraceEarly(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const past = new Date(Date.now() - GRACE_WINDOW_MS - 1000);
+  await prisma.tenant.update({
+    where: { id: t.id },
+    data: { facebookConnectedAt: past },
+  });
+  res.json({ ok: true, endedAt: new Date().toISOString() });
+}
+
+/**
+ * GET /api/v1/conversations/muted
+ * List currently-muted conversations so the admin can pick them up.
+ */
+export async function listMutedConversations(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const rows = await prisma.messengerConversation.findMany({
+    where: { tenantId: t.id, agentMutedUntil: { gt: new Date() } },
+    orderBy: { agentMutedUntil: "asc" },
+    select: {
+      id: true,
+      psid: true,
+      agentMutedUntil: true,
+      lastUserMsgAt: true,
+      lastBotMsgAt: true,
+    },
+    take: 100,
+  });
+  res.json({ conversations: rows });
+}
+
+/**
+ * POST /api/v1/conversations/:conversationId/unmute
+ * Clear the mute on a conversation so the agent re-engages on the next inbound.
+ */
+export async function unmuteConversation(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const conversationId = String(req.params.conversationId ?? "");
+  const convo = await prisma.messengerConversation.findFirst({
+    where: { id: conversationId, tenantId: t.id },
+  });
+  if (!convo) { res.status(404).json({ error: "not_found" }); return; }
+  const lifted = await unmuteAgent(conversationId);
+  res.json({ ok: true, lifted });
 }

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { probePathaoToken } from "../integrations/pathao/pathaoService.js";
+import { probeSteadfastConnection } from "../integrations/steadfast/steadfastService.js";
 
 type TenantSettings = {
   sslcommerz?: { storeId?: string; storePassword?: string; isLive?: boolean };
@@ -16,6 +17,10 @@ type TenantSettings = {
     password?: string;
     storeId?: number | string;
     isLive?: boolean;
+  };
+  steadfast?: {
+    apiKey?: string;
+    secretKey?: string;
   };
 };
 
@@ -320,5 +325,50 @@ export async function testTelegram(req: Request, res: Response): Promise<void> {
     const msg = e instanceof Error ? e.message : String(e);
     logger.warn({ err: msg }, "Telegram test failed");
     res.json({ ok: false, message: "Could not reach Telegram API.", detail: msg });
+  }
+}
+
+
+const steadfastBody = z
+  .object({
+    apiKey: z.string().trim().optional(),
+    secretKey: z.string().trim().optional(),
+  })
+  .partial()
+  .optional();
+
+/** Steadfast credential check — calls /get_balance with Api-Key + Secret-Key headers. */
+export async function testSteadfast(req: Request, res: Response): Promise<void> {
+  const parsed = steadfastBody.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ ok: false, message: "Invalid body" });
+    return;
+  }
+  const saved = tenantSettings(req).steadfast ?? {};
+  const apiKey = parsed.data?.apiKey ?? saved.apiKey ?? "";
+  const secretKey = parsed.data?.secretKey ?? saved.secretKey ?? "";
+  if (!apiKey || !secretKey) {
+    res.json({ ok: false, message: "API Key and Secret Key are required." });
+    return;
+  }
+  try {
+    const probe = await probeSteadfastConnection({ apiKey, secretKey });
+    if (probe.ok) {
+      res.json({
+        ok: true,
+        message: "Connected to Steadfast.",
+        detail: probe.balance != null ? `Current balance: ${probe.balance} BDT` : undefined,
+      });
+      return;
+    }
+    res.json({
+      ok: false,
+      message: "Steadfast rejected credentials.",
+      detail: `HTTP ${probe.status}: ${probe.detail}`,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    logger.warn({ err: msg }, "Steadfast test failed");
+    res.json({ ok: false, message: "Could not reach Steadfast.", detail: msg });
   }
 }

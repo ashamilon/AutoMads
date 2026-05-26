@@ -272,6 +272,18 @@
     return `<span class="badge ${cls}">${escapeHtml(t)}</span>`;
   }
 
+  /**
+   * Tenant activation status pill. Three states:
+   *  - Activated   — client has set a password, can log in via email + password.
+   *  - Pending     — admin issued an activation link that hasn't been used yet.
+   *  - Not active  — no password and no pending link. Click "Issue activation link".
+   */
+  function activationBadge(t) {
+    if (t.hasPassword) return '<span class="badge ok">activated</span>';
+    if (t.hasPendingActivation) return '<span class="badge warn">activation pending</span>';
+    return '<span class="badge">not activated</span>';
+  }
+
   // ----- Pages -------------------------------------------------------------
   async function pageDashboard() {
     setCrumbs([{ label: "Dashboard" }]);
@@ -673,6 +685,38 @@
     done.onclick = m.close;
   }
 
+  /**
+   * Show the activation URL the admin forwards to the client. The URL only
+   * exists for one minute on the server; once dismissed there's no way to
+   * recover it without re-issuing.
+   *
+   * `kind` switches the wording between a fresh activation (no password yet)
+   * and a password reset (existing password + sessions wiped).
+   */
+  function showActivationModal({ url, expiresAt, name, kind }) {
+    const code = el("div", { class: "code" }, [
+      el("span", { html: escapeHtml(url) }),
+      el("button", { class: "copy", title: "Copy", html: I.copy, onclick: () => copyText(url) }),
+    ]);
+    const description = kind === "reset"
+      ? `Old password and every active session for ${name} have been wiped. Forward this link — they will set a fresh password.`
+      : `${name} can open this link to set their email + password and sign in. The platform admin cannot see what they choose.`;
+    const expiryStr = expiresAt ? new Date(expiresAt).toLocaleString() : "in 7 days";
+    const body = el("div", {}, [
+      el("p", { class: "lede" }, description),
+      el("div", { style: "margin-top:14px;" }, [code]),
+      el("p", {
+        class: "lede",
+        style: "margin-top:14px;font-size:12px;color:var(--text-mute);",
+        html: `Expires ${escapeHtml(expiryStr)}. Forward via your usual secure channel \u2014 the URL is valid only once.`,
+      }),
+    ]);
+    const done = el("button", { class: "primary" }, "I have saved it");
+    const title = kind === "reset" ? "Password reset link (shown once)" : "Activation link (shown once)";
+    const m = modal({ title, body, foot: [done], size: "lg" });
+    done.onclick = m.close;
+  }
+
   // -------------------- Client detail -------------------------------------
   async function pageClientDetail(id) {
     setCrumbs([{ label: "Clients", href: "#/clients" }, { label: id.slice(0, 12) + "…" }]);
@@ -703,12 +747,14 @@
               · ${t.isActive ? '<span class="badge ok">active</span>' : '<span class="badge">inactive</span>'}
               · ${badgeForIntegration(t.integration && t.integration.type)}
               ${t.facebookPageId ? '· <span class="badge info">FB connected</span>' : ""}
+              · ${activationBadge(t)}
             </p>
           </div>
         </div>
-        <div style="display:flex;gap:8px;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button class="ghost" id="btnToggle">${t.isActive ? "Deactivate" : "Activate"}</button>
           <button class="secondary" id="btnRegen">${I.key}<span>Regenerate key</span></button>
+          <button class="secondary" id="btnActivate">${I.key}<span>${t.hasPassword ? "Reset password" : "Issue activation link"}</span></button>
           <button class="primary" id="btnEdit">${I.edit}<span>Edit</span></button>
         </div>
       </div>
@@ -734,6 +780,8 @@
           <dl class="kv">
             <dt>Tenant ID</dt><dd class="mono" style="font-size:12px;">${escapeHtml(t.id)}</dd>
             <dt>Slug</dt><dd class="mono" style="font-size:12px;">${escapeHtml(t.slug)}</dd>
+            <dt>Email</dt><dd>${t.email ? escapeHtml(t.email) : '<span style="color:var(--text-mute);">not set</span>'}</dd>
+            <dt>Login</dt><dd>${activationBadge(t)}${t.hasPendingActivation && t.activationExpiresAt ? ` <span style=\"color:var(--text-mute);font-size:12px;\">expires ${escapeHtml(new Date(t.activationExpiresAt).toLocaleString())}</span>` : ""}</dd>
             <dt>Page ID</dt><dd class="mono" style="font-size:12px;">${t.facebookPageId ? escapeHtml(t.facebookPageId) : '<span style="color:var(--text-mute);">not set</span>'}</dd>
             <dt>Verify token</dt><dd>${t.facebookVerifyToken ? '<span class="badge ok">set</span>' : '<span class="badge warn">missing</span>'}</dd>
             <dt>Page token</dt><dd>${t.facebookPageAccessToken ? '<span class="badge ok">set</span>' : '<span class="badge warn">missing</span>'}</dd>
@@ -783,6 +831,36 @@
       }
     };
     $("#btnEdit").onclick = () => openEditClientModal(t);
+
+    // Issue activation link / Reset password — single endpoint based on
+    // whether the client has set a password yet.
+    $("#btnActivate").onclick = async () => {
+      const isReset = !!t.hasPassword;
+      const ok = await confirmModal({
+        title: isReset ? "Reset password" : "Issue activation link",
+        message: isReset
+          ? `Wipes ${t.name}'s current password and EVERY active session, then mints a fresh activation link. Use only when the client has lost access.`
+          : `Issue an activation link for ${t.name}. Any previous link is invalidated. The client opens it to set their email + password — you cannot see what they choose.`,
+        danger: isReset,
+      });
+      if (!ok) return;
+      try {
+        const path = isReset
+          ? `/admin/tenants/${id}/reset-password`
+          : `/admin/tenants/${id}/issue-activation`;
+        const out = await api(path, { method: "POST" });
+        showActivationModal({
+          url: out.activationUrl,
+          expiresAt: out.activationExpiresAt,
+          name: t.name,
+          kind: isReset ? "reset" : "activate",
+        });
+        await loadTenants(true);
+        pageClientDetail(id);
+      } catch (e) {
+        toast(e.message, "err");
+      }
+    };
 
     // Load orders for this client
     try {

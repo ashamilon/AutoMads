@@ -3,6 +3,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../db/prisma.js";
 import { config } from "../../config/index.js";
 import { initiatePaymentSession } from "../../integrations/sslcommerz/sslcommerzService.js";
+import { initiateAamarPaySession } from "../../integrations/aamarpay/aamarpayService.js";
+import { createBkashPayment } from "../../integrations/bkash/bkashCheckoutService.js";
 import { sendMessengerText } from "../../integrations/facebook/messengerService.js";
 import { logger } from "../../utils/logger.js";
 import { parseTenantSettings } from "../../types/tenant-settings.js";
@@ -278,8 +280,30 @@ export const confirmTools: ToolDef[] = [
       const hasSsl =
         Boolean(settings.sslcommerz?.storeId?.trim()) &&
         Boolean(settings.sslcommerz?.storePassword?.trim());
+      const hasAamarPay =
+        Boolean(settings.aamarpay?.storeId?.trim()) &&
+        Boolean(settings.aamarpay?.signatureKey?.trim());
+      const hasBkashCheckout =
+        Boolean(settings.bkashCheckout?.appKey?.trim()) &&
+        Boolean(settings.bkashCheckout?.appSecret?.trim()) &&
+        Boolean(settings.bkashCheckout?.username?.trim()) &&
+        Boolean(settings.bkashCheckout?.password?.trim());
       const manual = settings.manualPayment;
       const hasManualBkash = Boolean(manual?.enabled && manual.bkash?.number?.trim());
+
+      // Priority: SSLCommerz → AamarPay → bKash Tokenized → manual bKash → manual Nagad.
+      // The first configured gateway wins. Tenants with multiple configured
+      // gateways can later expose a per-order picker; for now this matches the
+      // spec ("agent uses whichever is configured").
+      const chosenGateway: "SSLCOMMERZ" | "AAMARPAY" | "BKASH_TOKENIZED" | "BKASH_MANUAL" | "NAGAD_MANUAL" = hasSsl
+        ? "SSLCOMMERZ"
+        : hasAamarPay
+          ? "AAMARPAY"
+          : hasBkashCheckout
+            ? "BKASH_TOKENIZED"
+            : hasManualBkash
+              ? "BKASH_MANUAL"
+              : "NAGAD_MANUAL";
 
       const productSubtotalBdt = verify.subtotal;
       const advance = computeAdvanceForCart({
@@ -330,14 +354,18 @@ export const confirmTools: ToolDef[] = [
           paymentStatus: "PENDING",
           totalAmount: new Prisma.Decimal(productSubtotalBdt),
           currency: "BDT",
-          paymentMethod: hasSsl ? "SSLCOMMERZ" : hasManualBkash ? "BKASH_MANUAL" : "NAGAD_MANUAL",
+          paymentMethod: chosenGateway,
         },
       });
 
 
       let gatewayUrl: string | null = null;
       let tranId: string | null = null;
-      if (hasSsl) {
+      // bKash uses a paymentID rather than a merchant tran id — we stash it on
+      // sslcommerzSessionKey (reused as the universal gateway-session-id store).
+      let bkashPaymentId: string | null = null;
+
+      if (chosenGateway === "SSLCOMMERZ") {
         try {
           tranId = buildTranId(order.id);
           const base = config.publicBaseUrl.replace(/\/$/, "");
@@ -370,10 +398,80 @@ export const confirmTools: ToolDef[] = [
             "agent.confirm_order: SSL session init failed",
           );
         }
+      } else if (chosenGateway === "AAMARPAY") {
+        try {
+          tranId = buildTranId(order.id);
+          const base = config.publicBaseUrl.replace(/\/$/, "");
+          const successUrl = `${base}/webhooks/aamarpay/return?status=success&mer_txnid=${encodeURIComponent(tranId)}`;
+          const failUrl = `${base}/webhooks/aamarpay/return?status=fail&mer_txnid=${encodeURIComponent(tranId)}`;
+          const cancelUrl = `${base}/webhooks/aamarpay/return?status=cancel&mer_txnid=${encodeURIComponent(tranId)}`;
+          const ipnUrl = `${base}/webhooks/aamarpay/ipn`;
+          const apInput: Parameters<typeof initiateAamarPaySession>[0] = {
+            tranId,
+            totalAmount: payableNowBdt.toFixed(2),
+            currency: "BDT",
+            successUrl,
+            failUrl,
+            cancelUrl,
+            ipnUrl,
+            customerName: profile.name ?? "Customer",
+            customerPhone: profile.phone ?? "01700000000",
+            customerEmail: `fb-${ctx.input.psid}@customers.placeholder.local`,
+            customerAddress: profile.address ?? "N/A",
+            description: `Order ${order.id.slice(0, 12)}`,
+            storeId: settings.aamarpay!.storeId,
+            signatureKey: settings.aamarpay!.signatureKey,
+          };
+          if (settings.aamarpay?.isLive != null) apInput.isLive = settings.aamarpay.isLive;
+          const session = await initiateAamarPaySession(apInput);
+          gatewayUrl = session.gatewayUrl;
+        } catch (e) {
+          logger.warn(
+            { e: String(e), orderId: order.id },
+            "agent.confirm_order: AamarPay session init failed",
+          );
+        }
+      } else if (chosenGateway === "BKASH_TOKENIZED") {
+        try {
+          tranId = buildTranId(order.id);
+          const base = config.publicBaseUrl.replace(/\/$/, "");
+          // bKash uses a single callbackURL with status query param; we add
+          // the tran id so we can correlate even before the bKash paymentID is
+          // back from the create call.
+          const callbackUrl = `${base}/webhooks/bkash/callback`;
+          const bk = settings.bkashCheckout!;
+          const session = await createBkashPayment({
+            tranId,
+            amount: payableNowBdt.toFixed(2),
+            currency: "BDT",
+            callbackUrl,
+            payerReference: profile.phone ?? "01700000000",
+            reference: `Order ${order.id.slice(0, 12)}`,
+            creds: {
+              appKey: bk.appKey,
+              appSecret: bk.appSecret,
+              username: bk.username,
+              password: bk.password,
+              ...(bk.isLive != null ? { isLive: bk.isLive } : {}),
+            },
+          });
+          gatewayUrl = session.redirectUrl;
+          bkashPaymentId = session.paymentId;
+        } catch (e) {
+          logger.warn(
+            { e: String(e), orderId: order.id },
+            "agent.confirm_order: bKash Tokenized session init failed",
+          );
+        }
       }
 
-      const updateData: { status: "AWAITING_PAYMENT"; sslcommerzTranId?: string } = { status: "AWAITING_PAYMENT" };
+      const updateData: {
+        status: "AWAITING_PAYMENT";
+        sslcommerzTranId?: string;
+        sslcommerzSessionKey?: string;
+      } = { status: "AWAITING_PAYMENT" };
       if (tranId) updateData.sslcommerzTranId = tranId;
+      if (bkashPaymentId) updateData.sslcommerzSessionKey = bkashPaymentId;
       await prisma.order
         .update({ where: { id: order.id }, data: updateData })
         .catch(() => undefined);

@@ -52,8 +52,23 @@ model Tenant {
   facebookPageId          String?
   /// Random string you set in Meta webhook subscription
   facebookVerifyToken     String?
+  /// First time we saw a non-null facebookPageId. Drives the "grace window"
+  /// after Page connection: for 48h after this timestamp, the agent escalates
+  /// any past-order question to admin instead of guessing. Auto-stamped on
+  /// the first webhook turn the tenant receives if not already set.
+  facebookConnectedAt     DateTime?
   /// SHA-256 hex of full tenant API key (Bearer sk_live_...); set on create / regenerate
   apiKeyHash              String?  @unique
+  /// Login email. Lowercase, normalised. Set during one-time activation.
+  email                   String?  @unique
+  /// bcrypt hash of the dashboard password. Login requires email + password
+  /// to match. The platform admin (you) cannot read the password.
+  passwordHash            String?
+  /// One-time activation token (SHA-256 hash). Issued when admin creates the
+  /// tenant. Forwarded to the client; they open /activate?token=... to set
+  /// their email + password.
+  activationTokenHash     String?  @unique
+  activationExpiresAt     DateTime?
   /// e.g. { "defaultOrderAmountBdt": 500, "sslcommerz": { "storeId": "..." }, "pathao": { ... } }
   settings                Json?
   createdAt               DateTime @default(now())
@@ -68,6 +83,26 @@ model Tenant {
   customerProfiles  CustomerProfile[]
   followUps         FollowUp[]
   agentTraces       AgentTrace[]
+  sessions          TenantSession[]
+}
+
+/// Browser-session token issued after a successful email + password login.
+/// Stored as a SHA-256 hash. Auto-expires after 7 days. The cookie / bearer
+/// value is only visible to the client's browser; the admin (platform owner)
+/// cannot read it from the database.
+model TenantSession {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  lastSeen  DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([expiresAt])
 }
 
 /// One row per tenant — holds integration mode + JSON config (credentials live here; encrypt at rest in production)
@@ -105,6 +140,11 @@ model MessengerConversation {
   psid             String
   lastUserMsgAt    DateTime  @default(now())
   lastBotMsgAt     DateTime?
+  /// When set + in the future, the agent will NOT reply to inbound messages on
+  /// this conversation. Used by the post-connection grace handoff (10h mute
+  /// after admin escalation) and any future "human takeover" flow. After the
+  /// timestamp passes, the agent automatically re-engages on the next inbound.
+  agentMutedUntil  DateTime?
   /// Last extracted draft order JSON from LLM (not committed until validated)
   pendingDraftJson Json?
   createdAt        DateTime  @default(now())

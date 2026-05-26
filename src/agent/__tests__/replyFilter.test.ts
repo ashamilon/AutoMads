@@ -50,6 +50,78 @@ test("filterReply keeps sanitizeCustomerReply behaviour for direct callers", () 
   assert.equal(sanitizeCustomerReply("Apnar cart e checkout koren"), "Apnar list e order confirm koren");
 });
 
+// ─── Tone rewrites — soften robotic "dewa holo / kora holo" stems ───────────
+
+test("sanitizeCustomerReply softens 'niche dewa holo' into warm active phrasing", () => {
+  const out = sanitizeCustomerReply("Niche dewa holo apnar product list.");
+  assert.match(out, /ei je dekhe nin/);
+  assert.doesNotMatch(out, /dewa holo/i);
+});
+
+test("sanitizeCustomerReply softens 'pathano holo' into 'pathiye dilam'", () => {
+  const out = sanitizeCustomerReply("Apnar address e parcel pathano holo.");
+  assert.match(out, /pathiye dilam/);
+  assert.doesNotMatch(out, /pathano holo/i);
+});
+
+test("sanitizeCustomerReply rewrites 'add kora holo' into 'add kore dilam'", () => {
+  const out = sanitizeCustomerReply("Apnar list e item add kora holo.");
+  assert.match(out, /add kore dilam/);
+});
+
+test("filterReply records tone_rewrite override rows for 'dewa holo' replacements", () => {
+  const result = filterReply("Niche dewa holo apnar list.", [], []);
+  assert.match(result.text, /ei je dekhe nin/);
+  assert.ok(
+    result.overrides.some((o) => o.kind === "tone_rewrite"),
+    "must record at least one tone_rewrite override",
+  );
+});
+
+// ─── Capability-confession rewrites ──────────────────────────────────────────
+
+test("sanitizeCustomerReply rewrites 'uporer message dekhte parchi na' into a warm pivot", () => {
+  const out = sanitizeCustomerReply(
+    "Uporer message ami dekhte parchi na. Apnar order id ki?",
+  );
+  // The confession sentence is gone; the warm pivot is in.
+  assert.doesNotMatch(out, /dekhte parchi na/i);
+  assert.match(out, /Apni ektu bolen ki niye janche/);
+  // The follow-up question survives.
+  assert.match(out, /order id/);
+});
+
+test("sanitizeCustomerReply rewrites English 'I cannot see your previous messages' confession", () => {
+  const out = sanitizeCustomerReply(
+    "I cannot see your previous messages. Could you share more?",
+  );
+  assert.doesNotMatch(out, /cannot see/i);
+  assert.match(out, /Apni ektu bolen ki niye janche/);
+});
+
+test("sanitizeCustomerReply rewrites 'ami remember korte parchi na' confession", () => {
+  const out = sanitizeCustomerReply("Ami remember korte parchi na apnar age er order.");
+  assert.doesNotMatch(out, /remember korte parchi na/i);
+  assert.match(out, /Apni ektu bolen/);
+});
+
+test("sanitizeCustomerReply leaves clean replies untouched", () => {
+  const original = "Apnar order list ready, confirm korben?";
+  assert.equal(sanitizeCustomerReply(original), original);
+});
+
+test("filterReply records capability_confession override rows", () => {
+  const result = filterReply(
+    "Uporer message ami dekhte parchi na. Order id ta diben?",
+    [],
+    [],
+  );
+  assert.ok(
+    result.overrides.some((o) => o.kind === "capability_confession"),
+    "must record at least one capability_confession override",
+  );
+});
+
 // ─── Pass 2: anti-hallucination ──────────────────────────────────────────────
 
 test("filterReply strips ungrounded price tokens", () => {

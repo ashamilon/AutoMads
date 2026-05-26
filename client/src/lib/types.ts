@@ -4,6 +4,7 @@ export type TenantMe = {
   slug: string;
   isActive: boolean;
   facebookPageId: string | null;
+  hasFacebookPageAccessToken: boolean;
   settings: Record<string, unknown> | null;
   integration: {
     type: string;

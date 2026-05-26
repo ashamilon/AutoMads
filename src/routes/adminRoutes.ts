@@ -1,7 +1,9 @@
 import { Router } from "express";
 import {
+  adminResetTenantPassword,
   createTenant,
   getTenant,
+  issueTenantActivation,
   listTenantOrders,
   listTenants,
   patchTenant,
@@ -17,3 +19,5 @@ adminRoutes.get("/tenants/:tenantId/orders", listTenantOrders);
 adminRoutes.get("/tenants/:tenantId", getTenant);
 adminRoutes.patch("/tenants/:tenantId", patchTenant);
 adminRoutes.post("/tenants/:tenantId/regenerate-api-key", regenerateTenantApiKey);
+adminRoutes.post("/tenants/:tenantId/issue-activation", issueTenantActivation);
+adminRoutes.post("/tenants/:tenantId/reset-password", adminResetTenantPassword);

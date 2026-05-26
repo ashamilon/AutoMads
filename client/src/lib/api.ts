@@ -1,9 +1,25 @@
+/**
+ * Browser-side API client.
+ *
+ * Auth: prefers the session cookie issued by /auth/login (HttpOnly, set by
+ * the backend). On older deploys an `sk_live_` API key in localStorage is
+ * still accepted as a fallback so the developer-login tab keeps working.
+ *
+ * The session cookie travels automatically when we set `credentials:
+ * "include"` on fetch. We also send a SECONDARY copy of the session token
+ * in the `Authorization: Bearer <token>` header for environments where the
+ * portal runs on a different origin than the API and third-party cookies
+ * are blocked. The login response carries the plaintext token for that
+ * exact purpose.
+ */
+
+const SESSION_KEY = "tenant_session_token";
 const STORAGE_KEY = "tenant_api_key";
 const SLUG_KEY = "tenant_slug_cache";
 
 function storage(): Storage {
   if (typeof window === "undefined") return sessionStorage;
-  /** Prefer localStorage so you stay signed in across tabs & restarts until Sign out (demo-friendly). */
+  /** Prefer localStorage so you stay signed in across tabs & restarts until Sign out. */
   const preferSession =
     process.env.NEXT_PUBLIC_AUTH_PERSIST === "session";
   return preferSession ? sessionStorage : localStorage;
@@ -23,9 +39,21 @@ export function getWebhookBase(): string {
   ).replace(/\/$/, "");
 }
 
+// ─── Stored credentials ─────────────────────────────────────────────────────
+
 export function getStoredApiKey(): string | null {
   if (typeof window === "undefined") return null;
   return storage().getItem(STORAGE_KEY);
+}
+
+export function getStoredSessionToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return storage().getItem(SESSION_KEY);
+}
+
+/** Returns whichever credential the browser currently holds — session preferred. */
+export function getStoredCredential(): string | null {
+  return getStoredSessionToken() ?? getStoredApiKey();
 }
 
 export function setStoredAuth(apiKey: string, slugHint?: string) {
@@ -33,8 +61,14 @@ export function setStoredAuth(apiKey: string, slugHint?: string) {
   if (slugHint) storage().setItem(SLUG_KEY, slugHint);
 }
 
+export function setStoredSessionToken(token: string, slugHint?: string) {
+  storage().setItem(SESSION_KEY, token);
+  if (slugHint) storage().setItem(SLUG_KEY, slugHint);
+}
+
 export function clearStoredAuth() {
   storage().removeItem(STORAGE_KEY);
+  storage().removeItem(SESSION_KEY);
   storage().removeItem(SLUG_KEY);
 }
 
@@ -49,16 +83,35 @@ export class ApiError extends Error {
   }
 }
 
-export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const key = getStoredApiKey();
-  if (!key) throw new Error("Not signed in");
+// ─── Fetch wrappers ─────────────────────────────────────────────────────────
+
+function buildAuthHeader(): Record<string, string> {
+  const cred = getStoredCredential();
+  if (!cred) return {};
+  return { Authorization: `Bearer ${cred}` };
+}
+
+/**
+ * `requireAuth: false` is used for the public auth endpoints (login,
+ * activate). Defaults to true; throws "Not signed in" when no credential is
+ * stored, mirroring legacy behavior.
+ */
+export async function apiFetch<T>(
+  path: string,
+  init?: RequestInit & { requireAuth?: boolean },
+): Promise<T> {
+  const requireAuth = init?.requireAuth !== false;
+  if (requireAuth && !getStoredCredential()) {
+    throw new Error("Not signed in");
+  }
   let res: Response;
   try {
     res = await fetch(`${getApiBase()}${path}`, {
       ...init,
+      credentials: "include",
       headers: {
-        Authorization: `Bearer ${key}`,
         "Content-Type": "application/json",
+        ...buildAuthHeader(),
         ...init?.headers,
       },
     });
@@ -84,16 +137,14 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
 
 /** Multipart (e.g. persona file upload). Do not set Content-Type — browser sets boundary. */
 export async function apiFormPost<T>(path: string, form: FormData): Promise<T> {
-  const key = getStoredApiKey();
-  if (!key) throw new Error("Not signed in");
+  if (!getStoredCredential()) throw new Error("Not signed in");
   let res: Response;
   try {
     res = await fetch(`${getApiBase()}${path}`, {
       method: "POST",
       body: form,
-      headers: {
-        Authorization: `Bearer ${key}`,
-      },
+      credentials: "include",
+      headers: buildAuthHeader(),
     });
   } catch {
     throw new ApiError("Network error — is the API running on " + getApiBase() + "?", 0, "");
@@ -118,16 +169,14 @@ export async function apiFormPost<T>(path: string, form: FormData): Promise<T> {
 
 /**
  * Authenticated GET that opens the response (e.g. a PDF) in a new tab via a blob URL.
- * Used by buttons like "Download Invoice" where window.open won't carry our Bearer token
- * and the API URL lives on a different host than the Next.js portal.
  */
 export async function apiOpenBlob(path: string): Promise<void> {
-  const key = getStoredApiKey();
-  if (!key) throw new Error("Not signed in");
+  if (!getStoredCredential()) throw new Error("Not signed in");
   let res: Response;
   try {
     res = await fetch(`${getApiBase()}${path}`, {
-      headers: { Authorization: `Bearer ${key}` },
+      credentials: "include",
+      headers: buildAuthHeader(),
     });
   } catch {
     throw new ApiError(

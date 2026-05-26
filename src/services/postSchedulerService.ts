@@ -2,9 +2,12 @@ import { prisma } from "../db/prisma.js";
 import { logger } from "../utils/logger.js";
 import { publishScheduledPost } from "./socialPostService.js";
 import { processDueFollowUps } from "../agent/followUp.js";
+import { runContentAgentForAllTenants } from "./contentAgentService.js";
 
 const POLL_INTERVAL_MS = 60_000;
+const CONTENT_AGENT_INTERVAL_MS = 60 * 60 * 1000; // hourly
 let running = false;
+let lastContentAgentRun = 0;
 
 async function tick(): Promise<void> {
   if (running) return;
@@ -37,6 +40,15 @@ async function tick(): Promise<void> {
     await processDueFollowUps().catch((e: unknown) =>
       logger.warn({ e: String(e) }, "Scheduler: agent follow-up drain failed"),
     );
+
+    // Phase 3: drain the autonomous content agent. Hourly cadence so we don't
+    // spam Ollama; the agent itself enforces the per-tenant daily quota.
+    if (Date.now() - lastContentAgentRun >= CONTENT_AGENT_INTERVAL_MS) {
+      lastContentAgentRun = Date.now();
+      await runContentAgentForAllTenants().catch((e: unknown) =>
+        logger.warn({ e: String(e) }, "Scheduler: content agent drain failed"),
+      );
+    }
   } catch (e) {
     logger.error({ e: String(e) }, "Post scheduler tick error");
   } finally {

@@ -53,6 +53,9 @@ function readCloudinaryFromSettings(settings: TenantMe["settings"]) {
 const MANUAL_SIMPLE_KEYS = new Set([
   "name",
   "price",
+  "compareAtPrice",
+  "saleStartsAt",
+  "saleEndsAt",
   "stock",
   "images",
   "description",
@@ -226,6 +229,22 @@ function formatMetaNumberForInput(v: unknown): string {
   return "";
 }
 
+/**
+ * Convert an ISO timestamp into the `YYYY-MM-DDTHH:mm` shape required by an
+ * `<input type="datetime-local">`. Local time, no offset suffix. Returns
+ * empty string for missing or invalid values.
+ */
+function formatIsoForDatetimeLocal(v: unknown): string {
+  if (typeof v !== "string" || !v.trim()) return "";
+  const d = new Date(v);
+  if (!Number.isFinite(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
+}
+
 /** Extra metadata shown in Advanced JSON (everything except simple-form keys). */
 function metaForAdvancedEditor(meta: Record<string, unknown>): Record<string, unknown> {
   const rest: Record<string, unknown> = { ...meta };
@@ -236,6 +255,9 @@ function metaForAdvancedEditor(meta: Record<string, unknown>): Record<string, un
 function buildManualMetadata(args: {
   productName: string;
   priceStr: string;
+  compareAtPriceStr: string;
+  saleStartsAtStr: string;
+  saleEndsAtStr: string;
   stockStr: string;
   photoUrlsText: string;
   description: string;
@@ -276,6 +298,53 @@ function buildManualMetadata(args: {
       return { ok: false, error: "Price must be a valid number, or leave the field empty." };
     }
     merged.price = price;
+  }
+
+  // Compare price + sale window. The agent treats the offer as active only
+  // when within the window AND compareAtPrice > price; otherwise it falls
+  // back to the regular price.
+  if (args.compareAtPriceStr.trim()) {
+    const compare = parseOptionalNumber(args.compareAtPriceStr);
+    if (compare === undefined) {
+      return { ok: false, error: "Compare price must be a valid number, or leave the field empty." };
+    }
+    if (typeof merged.price === "number" && compare <= merged.price) {
+      return {
+        ok: false,
+        error: "Compare price must be HIGHER than the sell price (it's the 'was' / regular amount).",
+      };
+    }
+    merged.compareAtPrice = compare;
+  } else {
+    delete merged.compareAtPrice;
+  }
+  // datetime-local inputs come back as "YYYY-MM-DDTHH:mm" without a TZ; let
+  // the browser parse that as local time and we serialise as ISO.
+  const startsRaw = args.saleStartsAtStr.trim();
+  if (startsRaw) {
+    const d = new Date(startsRaw);
+    if (!Number.isFinite(d.getTime())) {
+      return { ok: false, error: "Sale start time isn't a valid date." };
+    }
+    merged.saleStartsAt = d.toISOString();
+  } else {
+    delete merged.saleStartsAt;
+  }
+  const endsRaw = args.saleEndsAtStr.trim();
+  if (endsRaw) {
+    const d = new Date(endsRaw);
+    if (!Number.isFinite(d.getTime())) {
+      return { ok: false, error: "Sale end time isn't a valid date." };
+    }
+    if (startsRaw) {
+      const startD = new Date(startsRaw);
+      if (Number.isFinite(startD.getTime()) && d.getTime() <= startD.getTime()) {
+        return { ok: false, error: "Sale end time must be after the start time." };
+      }
+    }
+    merged.saleEndsAt = d.toISOString();
+  } else {
+    delete merged.saleEndsAt;
   }
 
   const sizeParse = parseSizeStockRows(args.sizeStockRows);
@@ -361,6 +430,9 @@ export default function CatalogPage() {
   const [sku, setSku] = useState("");
   const [productName, setProductName] = useState("");
   const [priceStr, setPriceStr] = useState("");
+  const [compareAtPriceStr, setCompareAtPriceStr] = useState("");
+  const [saleStartsAtStr, setSaleStartsAtStr] = useState("");
+  const [saleEndsAtStr, setSaleEndsAtStr] = useState("");
   const [stockStr, setStockStr] = useState("");
   const [photoUrlsText, setPhotoUrlsText] = useState("");
   const [description, setDescription] = useState("");
@@ -462,6 +534,9 @@ export default function CatalogPage() {
       const built = buildManualMetadata({
         productName,
         priceStr,
+        compareAtPriceStr,
+        saleStartsAtStr,
+        saleEndsAtStr,
         stockStr,
         photoUrlsText,
         description,
@@ -491,6 +566,9 @@ export default function CatalogPage() {
       setSku("");
       setProductName("");
       setPriceStr("");
+      setCompareAtPriceStr("");
+      setSaleStartsAtStr("");
+      setSaleEndsAtStr("");
       setStockStr("");
       setPhotoUrlsText("");
       setDescription("");
@@ -691,6 +769,9 @@ export default function CatalogPage() {
     const displayName = String(r.facebookLabel ?? meta.name ?? "").trim();
     setProductName(displayName);
     setPriceStr(formatMetaNumberForInput(meta.price));
+    setCompareAtPriceStr(formatMetaNumberForInput(meta.compareAtPrice));
+    setSaleStartsAtStr(formatIsoForDatetimeLocal(meta.saleStartsAt));
+    setSaleEndsAtStr(formatIsoForDatetimeLocal(meta.saleEndsAt));
     if (metaHasPerSizeStock(meta)) setStockStr("");
     else setStockStr(formatMetaNumberForInput(meta.stock));
     setPhotoUrlsText(photoUrlsTextFromMeta(meta));
@@ -850,7 +931,10 @@ export default function CatalogPage() {
                     {r.facebookLabel && (
                       <p className="truncate text-sm font-medium text-slate-200">{r.facebookLabel}</p>
                     )}
-                    <p className="font-mono text-xs text-indigo-300/70">{r.clientSku}</p>
+                    <div className="mt-0.5 flex items-center gap-2">
+                      <p className="font-mono text-xs text-indigo-300/70">{r.clientSku}</p>
+                      <SaleChip meta={r.metadata as Record<string, unknown> | null} />
+                    </div>
                   </button>
                   <button
                     type="button"
@@ -1217,6 +1301,43 @@ export default function CatalogPage() {
                   />
                 </Field>
               </div>
+              <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-300">
+                  Sale &amp; countdown
+                </p>
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                  Set a higher &quot;regular&quot; compare-at price and a sale window. Inside the window the
+                  agent quotes the sale price with the regular price crossed out and a live countdown.
+                  Leave compare price empty to disable the offer entirely.
+                </p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                  <Field label="Compare price (BDT)" hint="The higher 'was' price.">
+                    <input
+                      inputMode="decimal"
+                      value={compareAtPriceStr}
+                      onChange={(e) => setCompareAtPriceStr(e.target.value)}
+                      placeholder="3499"
+                      className={inputCls}
+                    />
+                  </Field>
+                  <Field label="Sale starts" hint="Optional. Empty = starts immediately.">
+                    <input
+                      type="datetime-local"
+                      value={saleStartsAtStr}
+                      onChange={(e) => setSaleStartsAtStr(e.target.value)}
+                      className={inputCls}
+                    />
+                  </Field>
+                  <Field label="Sale ends" hint="Optional. Empty = no expiry.">
+                    <input
+                      type="datetime-local"
+                      value={saleEndsAtStr}
+                      onChange={(e) => setSaleEndsAtStr(e.target.value)}
+                      className={inputCls}
+                    />
+                  </Field>
+                </div>
+              </div>
               <Field
                 label="Kit type"
                 hint="Used for size-chart hints (player = tighter authentic fit, fan = replica) when you do not attach a custom size chart."
@@ -1542,6 +1663,57 @@ function Field({
       {children}
       {hint ? <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">{hint}</p> : null}
     </label>
+  );
+}
+
+/**
+ * Live "On sale — ends in 02:14:33" chip for catalog rows. Reads
+ * `compareAtPrice` + `saleStartsAt` + `saleEndsAt` from product metadata.
+ * Re-renders every second when there's an active end timestamp so the
+ * countdown stays accurate; renders nothing for products without an
+ * active offer.
+ */
+function SaleChip({ meta }: { meta: Record<string, unknown> | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  // Tick every second when there's an end timestamp; otherwise no interval.
+  const endsAtRaw = meta && typeof meta === "object" && !Array.isArray(meta) ? meta.saleEndsAt : null;
+  useEffect(() => {
+    if (typeof endsAtRaw !== "string" || !endsAtRaw) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [endsAtRaw]);
+
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const m = meta as Record<string, unknown>;
+  const price = typeof m.price === "number" ? m.price : Number(m.price);
+  const compare = typeof m.compareAtPrice === "number" ? m.compareAtPrice : Number(m.compareAtPrice);
+  if (!Number.isFinite(price) || !Number.isFinite(compare) || compare <= price) return null;
+
+  const startsAt = typeof m.saleStartsAt === "string" ? new Date(m.saleStartsAt) : null;
+  const endsAt = typeof m.saleEndsAt === "string" ? new Date(m.saleEndsAt) : null;
+  const inWindow =
+    (!startsAt || (Number.isFinite(startsAt.getTime()) && startsAt.getTime() <= now)) &&
+    (!endsAt || (Number.isFinite(endsAt.getTime()) && endsAt.getTime() > now));
+  if (!inWindow) return null;
+
+  let countdown = "";
+  if (endsAt && Number.isFinite(endsAt.getTime())) {
+    const diff = Math.max(0, endsAt.getTime() - now);
+    const sec = Math.floor(diff / 1000);
+    const days = Math.floor(sec / 86400);
+    const hours = Math.floor((sec % 86400) / 3600);
+    const mins = Math.floor((sec % 3600) / 60);
+    const secs = sec % 60;
+    if (days >= 1) countdown = `${days}d ${String(hours).padStart(2, "0")}h`;
+    else countdown = `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+
+  const savePct = Math.round(((compare - price) / compare) * 100);
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-200">
+      <span>−{savePct}%</span>
+      {countdown && <span className="font-mono text-amber-100/80">{countdown}</span>}
+    </span>
   );
 }
 

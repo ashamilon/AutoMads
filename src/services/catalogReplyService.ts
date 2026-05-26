@@ -1,5 +1,6 @@
 import type { ProductMapping } from "@prisma/client";
 import type { TenantSettings } from "../types/tenant-settings.js";
+import { formatRemaining, resolveProductPricing } from "../agent/productPricing.js";
 
 export type TenantSizeChart = NonNullable<TenantSettings["sizeCharts"]>[number];
 
@@ -774,8 +775,21 @@ export function buildDeterministicCatalogReply(
   const sections: string[] = [];
   sections.push(`${flag} ${name}`);
 
-  const price = formatPriceBdt(meta["price"]);
-  if (price) sections.push(`💰 ${price} BDT`);
+  const facts = resolveProductPricing(meta);
+  if (facts.effectivePriceBdt != null) {
+    if (facts.isOnSale && facts.regularPriceBdt != null) {
+      const tail = facts.endsAt
+        ? `offer ends in ${formatRemaining(new Date(facts.endsAt))}`
+        : "limited offer";
+      sections.push(
+        `💰 ${facts.effectivePriceBdt} BDT  ~~${facts.regularPriceBdt} BDT~~` +
+          (facts.savingsPercent ? `  · save ${facts.savingsPercent}%` : "") +
+          `\n⏳ ${tail}`,
+      );
+    } else {
+      sections.push(`💰 ${facts.effectivePriceBdt} BDT`);
+    }
+  }
 
   const bySize = readSizeStocksMap(meta);
   const sizeKeys = Object.keys(bySize);
@@ -1045,11 +1059,24 @@ export function buildPriceStockReply(m: ProductMapping, opts: ProductReplyOpts =
   const meta = readMetaObject(m);
   const name = (m.facebookLabel ?? String(meta["name"] ?? "Product")).trim();
   const flag = pickTeamEmoji(name, meta);
-  const price = formatPriceBdt(meta["price"]);
+  const facts = resolveProductPricing(meta);
+  const sections: string[] = [`${flag} ${name}`];
+  if (facts.effectivePriceBdt != null) {
+    if (facts.isOnSale && facts.regularPriceBdt != null) {
+      const tail = facts.endsAt
+        ? `offer ends in ${formatRemaining(new Date(facts.endsAt))}`
+        : "limited offer";
+      sections.push(
+        `💰 ${facts.effectivePriceBdt} BDT  ~~${facts.regularPriceBdt} BDT~~` +
+          (facts.savingsPercent ? `  · save ${facts.savingsPercent}%` : "") +
+          `\n⏳ ${tail}`,
+      );
+    } else {
+      sections.push(`💰 ${facts.effectivePriceBdt} BDT`);
+    }
+  }
   const available = availableSizesFromMeta(meta);
   const lows = lowStockHighlights(meta);
-  const sections: string[] = [`${flag} ${name}`];
-  if (price) sections.push(`💰 ${price} BDT`);
   if (available.length > 0) sections.push(`📏 Sizes:\n${available.join(" · ")}`);
   if (lows.length > 0) {
     const lines = lows.map((x) => `Only ${x.qty} pieces left in ${x.size}`).join("\n");

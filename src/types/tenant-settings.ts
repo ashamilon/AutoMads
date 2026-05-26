@@ -6,6 +6,36 @@ export const tenantSettingsSchema = z
     /** Delivery charge shown to customers during checkout/order confirmation. */
     deliveryChargeBdt: z.number().min(0).optional(),
     /**
+     * Delivery time presets the agent quotes when a customer asks "kobe pabo?"
+     * / "delivery koto din?". Two presets:
+     *   - `normal`     — plain orders with no add-ons (e.g. 1-3 days).
+     *   - `customised` — orders containing at least one add-on (name+number,
+     *     custom font, etc.). Typically slower (e.g. 5-7 days).
+     *
+     * The agent picks `customised` when ANY cart line has add-ons (matches
+     * the same `hasCustomizedItems` signal the courier auto-booking uses);
+     * otherwise it picks `normal`.
+     *
+     * `minDays` and `maxDays` are integers in DAYS. Either can be omitted to
+     * quote a single number ("3 din").
+     */
+    deliveryTimes: z
+      .object({
+        normal: z
+          .object({
+            minDays: z.number().int().min(0).max(120).optional(),
+            maxDays: z.number().int().min(0).max(120).optional(),
+          })
+          .optional(),
+        customised: z
+          .object({
+            minDays: z.number().int().min(0).max(120).optional(),
+            maxDays: z.number().int().min(0).max(120).optional(),
+          })
+          .optional(),
+      })
+      .optional(),
+    /**
      * Legacy fixed advance amount. Treated as `advancePolicy: { mode: "fixed", fixedAmountBdt }`
      * when `advancePolicy` is not set. Kept for backward compatibility — new tenants should set
      * `advancePolicy` instead.
@@ -46,6 +76,34 @@ export const tenantSettingsSchema = z
         isLive: z.boolean().optional(),
       })
       .optional(),
+    /**
+     * AamarPay gateway. Single API, IPN webhook, no OAuth. Credentials come
+     * from the tenant's AamarPay merchant dashboard.
+     */
+    aamarpay: z
+      .object({
+        storeId: z.string().min(1),
+        signatureKey: z.string().min(1),
+        /** true = secure.aamarpay.com, false/undefined = sandbox.aamarpay.com. */
+        isLive: z.boolean().optional(),
+      })
+      .optional(),
+    /**
+     * bKash Tokenized Checkout (merchant gateway). Credentials issued by bKash
+     * after the merchant agreement + KYC. Distinct sandbox/live credentials.
+     * The integration polls `query-payment` after the customer redirects back —
+     * bKash does NOT push an IPN automatically.
+     */
+    bkashCheckout: z
+      .object({
+        appKey: z.string().min(1),
+        appSecret: z.string().min(1),
+        username: z.string().min(1),
+        password: z.string().min(1),
+        /** true = tokenized.pay.bka.sh, false/undefined = tokenized.sandbox.bka.sh. */
+        isLive: z.boolean().optional(),
+      })
+      .optional(),
     pathao: z
       .object({
         baseUrl: z.string().url().optional(),
@@ -60,6 +118,27 @@ export const tenantSettingsSchema = z
         bookingMode: z.enum(["automatic", "manual", "smart"]).optional(),
       })
       .optional(),
+    /**
+     * Steadfast (Packzy) courier integration. Single base URL for sandbox + live —
+     * the tenant uses different credentials per env. No OAuth: every request
+     * carries `Api-Key` + `Secret-Key` headers. The tenant's status webhook
+     * (configured during onboarding with Steadfast support) posts to
+     * `/webhooks/steadfast/status`. We also fall back to polling
+     * `/api/v1/status_by_cid/<consignmentId>` for tracking.
+     */
+    steadfast: z
+      .object({
+        apiKey: z.string().min(1),
+        secretKey: z.string().min(1),
+        /** "automatic" = book immediately after payment, "manual" = admin books from dashboard, "smart" = auto for plain, manual for customized. Same shape as pathao.bookingMode. */
+        bookingMode: z.enum(["automatic", "manual", "smart"]).optional(),
+      })
+      .optional(),
+    /**
+     * Selects which courier is the "primary" for this tenant. Both can be
+     * configured; the agent uses this when auto-booking.
+     */
+    courierProvider: z.enum(["pathao", "steadfast"]).optional(),
     /**
      * Tenant-managed library of size charts. Gemma / the deterministic responder picks
      * one by matching the customer's message against `label` + `aliases`. First chart
@@ -195,6 +274,12 @@ export const tenantSettingsSchema = z
     botPersona: z
       .object({
         name: z.string().optional(),
+        /**
+         * Job title / role the bot uses when introducing itself ("Moderator of
+         * this Page", "Customer support", etc.). Defaults to "Moderator of this
+         * Page" when undefined — see `resolvePersonaIdentity`.
+         */
+        role: z.string().optional(),
         tone: z.string().optional(),
         examples: z
           .array(z.object({ user: z.string(), assistant: z.string() }))

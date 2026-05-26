@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Section, Tabs } from "@/components/ui/section";
 import { useTenant } from "@/context/tenant-context";
 import { apiFetch, apiFormPost, getWebhookBase } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import {
   Bot,
   CheckCircle2,
@@ -118,6 +119,15 @@ const PRESET = {
 type SettingsShape = {
   defaultOrderAmountBdt?: number;
   deliveryChargeBdt?: number;
+  /** Number-range delivery time presets surfaced to customers when they ask
+   *  "kobe pabo?" / "koto din lagbe?". `customised` is quoted when the cart
+   *  has at least one add-on (name+number, custom font, etc.); otherwise
+   *  `normal` is quoted. Either side of a range can be left blank to quote
+   *  a single number. */
+  deliveryTimes?: {
+    normal?: { minDays?: number; maxDays?: number };
+    customised?: { minDays?: number; maxDays?: number };
+  };
   /** Legacy fixed advance amount; the new advancePolicy supersedes this when set. */
   advancePaymentBdt?: number;
   /**
@@ -140,6 +150,14 @@ type SettingsShape = {
     invoicePrefix?: string;
   };
   sslcommerz?: { storeId?: string; storePassword?: string; isLive?: boolean };
+  aamarpay?: { storeId?: string; signatureKey?: string; isLive?: boolean };
+  bkashCheckout?: {
+    appKey?: string;
+    appSecret?: string;
+    username?: string;
+    password?: string;
+    isLive?: boolean;
+  };
   pathao?: {
     clientId?: string;
     clientSecret?: string;
@@ -149,6 +167,12 @@ type SettingsShape = {
     isLive?: boolean;
     bookingMode?: "automatic" | "manual" | "smart";
   };
+  steadfast?: {
+    apiKey?: string;
+    secretKey?: string;
+    bookingMode?: "automatic" | "manual" | "smart";
+  };
+  courierProvider?: "pathao" | "steadfast";
   manualPayment?: {
     enabled?: boolean;
     bkash?: { number?: string; accountType?: string };
@@ -170,6 +194,17 @@ type SettingsShape = {
   manualPaymentAdminLogs?: ManualPaymentAdminLog[];
   sizeCharts?: SizeChart[];
   addOns?: AddOn[];
+  /**
+   * Identity the bot uses with customers. `name` defaults to "Karim" and
+   * `role` defaults to "Moderator of this Page" — see `resolvePersonaIdentity`
+   * on the server.
+   */
+  botPersona?: {
+    name?: string;
+    role?: string;
+    tone?: string;
+    examples?: Array<{ user: string; assistant: string }>;
+  };
   [k: string]: unknown;
 };
 
@@ -188,6 +223,7 @@ export default function SettingsPage() {
   const personaFilesRef = useRef<HTMLInputElement>(null);
   const [sslTest, setSslTest] = useState<TestState>({ status: "idle" });
   const [pathaoTest, setPathaoTest] = useState<TestState>({ status: "idle" });
+  const [steadfastTest, setSteadfastTest] = useState<TestState>({ status: "idle" });
   const [telegramTest, setTelegramTest] = useState<TestState>({ status: "idle" });
 
   useEffect(() => {
@@ -305,7 +341,11 @@ export default function SettingsPage() {
       return next;
     });
   }
-  function updateNested(group: "sslcommerz" | "pathao" | "cloudinary", key: string, value: unknown) {
+  function updateNested(
+    group: "sslcommerz" | "pathao" | "cloudinary" | "aamarpay" | "bkashCheckout" | "steadfast",
+    key: string,
+    value: unknown,
+  ) {
     setSettings((prev) => {
       const next = {
         ...prev,
@@ -316,10 +356,16 @@ export default function SettingsPage() {
     });
     if (group === "sslcommerz") setSslTest({ status: "idle" });
     if (group === "pathao") setPathaoTest({ status: "idle" });
+    if (group === "steadfast") setSteadfastTest({ status: "idle" });
   }
 
-  async function testConnection(kind: "sslcommerz" | "pathao") {
-    const setTest = kind === "sslcommerz" ? setSslTest : setPathaoTest;
+  async function testConnection(kind: "sslcommerz" | "pathao" | "steadfast") {
+    const setTest =
+      kind === "sslcommerz"
+        ? setSslTest
+        : kind === "pathao"
+          ? setPathaoTest
+          : setSteadfastTest;
     setTest({ status: "testing" });
     try {
       const body =
@@ -329,13 +375,18 @@ export default function SettingsPage() {
               storePassword: settings.sslcommerz?.storePassword ?? "",
               isLive: Boolean(settings.sslcommerz?.isLive),
             }
-          : {
-              clientId: settings.pathao?.clientId ?? "",
-              clientSecret: settings.pathao?.clientSecret ?? "",
-              username: settings.pathao?.username ?? "",
-              password: settings.pathao?.password ?? "",
-              isLive: Boolean(settings.pathao?.isLive),
-            };
+          : kind === "pathao"
+            ? {
+                clientId: settings.pathao?.clientId ?? "",
+                clientSecret: settings.pathao?.clientSecret ?? "",
+                username: settings.pathao?.username ?? "",
+                password: settings.pathao?.password ?? "",
+                isLive: Boolean(settings.pathao?.isLive),
+              }
+            : {
+                apiKey: settings.steadfast?.apiKey ?? "",
+                secretKey: settings.steadfast?.secretKey ?? "",
+              };
       const r = await apiFetch<{ ok: boolean; message?: string; detail?: string }>(
         `/api/v1/integrations/${kind}/test`,
         { method: "POST", body: JSON.stringify(body) },
@@ -616,6 +667,18 @@ export default function SettingsPage() {
                   else merged.advancePolicy = next;
                   if (legacy === undefined) delete merged.advancePaymentBdt;
                   else merged.advancePaymentBdt = legacy;
+                  setJson(JSON.stringify(merged, null, 2));
+                  return merged;
+                });
+              }}
+            />
+            <DeliveryTimeEditor
+              value={settings.deliveryTimes}
+              onChange={(next) => {
+                setSettings((prev) => {
+                  const merged: SettingsShape = { ...prev };
+                  if (next === undefined) delete merged.deliveryTimes;
+                  else merged.deliveryTimes = next;
                   setJson(JSON.stringify(merged, null, 2));
                   return merged;
                 });
@@ -1029,6 +1092,105 @@ export default function SettingsPage() {
           </Section>
 
           <Section
+            title="AamarPay"
+            description="Cards + mobile banking via AamarPay. Single API, supports IPN webhook for instant order confirmation."
+          >
+            <EnvToggle
+              value={settings.aamarpay?.isLive ? "live" : "sandbox"}
+              onChange={(mode) => updateNested("aamarpay", "isLive", mode === "live")}
+              hint={
+                settings.aamarpay?.isLive
+                  ? "Hitting secure.aamarpay.com (live)"
+                  : "Hitting sandbox.aamarpay.com"
+              }
+            />
+            <div className="grid gap-4 md:grid-cols-2">
+              <Field label="Store ID">
+                <input
+                  value={settings.aamarpay?.storeId ?? ""}
+                  onChange={(e) => updateNested("aamarpay", "storeId", e.target.value)}
+                  placeholder="aamarpaytest"
+                  className={inputCls}
+                />
+              </Field>
+              <Field label="Signature Key">
+                <input
+                  type="password"
+                  value={settings.aamarpay?.signatureKey ?? ""}
+                  onChange={(e) => updateNested("aamarpay", "signatureKey", e.target.value)}
+                  placeholder="••••••••"
+                  className={inputCls}
+                />
+              </Field>
+            </div>
+            <p className="mt-3 text-[11px] leading-relaxed text-slate-500">
+              IPN URL to register on the AamarPay merchant dashboard:
+              <code className="ml-1 rounded bg-black/30 px-1 py-0.5 text-[10px] text-indigo-300">
+                {"<your domain>"}/webhooks/aamarpay/ipn
+              </code>
+              . The agent picks AamarPay automatically when SSLCommerz isn't configured.
+            </p>
+          </Section>
+
+          <Section
+            title="bKash (Tokenized Checkout)"
+            description="Direct bKash gateway. Requires merchant agreement + KYC. Returns customer to a callback URL after payment; the order is verified via the status API."
+          >
+            <EnvToggle
+              value={settings.bkashCheckout?.isLive ? "live" : "sandbox"}
+              onChange={(mode) => updateNested("bkashCheckout", "isLive", mode === "live")}
+              hint={
+                settings.bkashCheckout?.isLive
+                  ? "Hitting tokenized.pay.bka.sh (live)"
+                  : "Hitting tokenized.sandbox.bka.sh"
+              }
+            />
+            <div className="grid gap-4 md:grid-cols-2">
+              <Field label="App Key">
+                <input
+                  value={settings.bkashCheckout?.appKey ?? ""}
+                  onChange={(e) => updateNested("bkashCheckout", "appKey", e.target.value)}
+                  placeholder="from bKash merchant portal"
+                  className={inputCls}
+                />
+              </Field>
+              <Field label="App Secret">
+                <input
+                  type="password"
+                  value={settings.bkashCheckout?.appSecret ?? ""}
+                  onChange={(e) => updateNested("bkashCheckout", "appSecret", e.target.value)}
+                  placeholder="••••••••"
+                  className={inputCls}
+                />
+              </Field>
+              <Field label="Username">
+                <input
+                  value={settings.bkashCheckout?.username ?? ""}
+                  onChange={(e) => updateNested("bkashCheckout", "username", e.target.value)}
+                  placeholder="from bKash merchant portal"
+                  className={inputCls}
+                />
+              </Field>
+              <Field label="Password">
+                <input
+                  type="password"
+                  value={settings.bkashCheckout?.password ?? ""}
+                  onChange={(e) => updateNested("bkashCheckout", "password", e.target.value)}
+                  placeholder="••••••••"
+                  className={inputCls}
+                />
+              </Field>
+            </div>
+            <p className="mt-3 text-[11px] leading-relaxed text-slate-500">
+              Callback URL to register on the bKash merchant portal:
+              <code className="ml-1 rounded bg-black/30 px-1 py-0.5 text-[10px] text-indigo-300">
+                {"<your domain>"}/webhooks/bkash/callback
+              </code>
+              . The agent picks bKash Tokenized after SSLCommerz / AamarPay if those aren't configured.
+            </p>
+          </Section>
+
+          <Section
             title="Manual mobile payments (bKash / Nagad)"
             description="Personal send-money fallback. The bot offers these alongside SSLCommerz; admin verifies the transaction id from the order page."
           >
@@ -1398,6 +1560,68 @@ export default function SettingsPage() {
           description="Paste Messenger threads, upload .txt/.csv exports, or screenshots (PNG/JPG/WebP). Text is read directly; images use OCR (Latin/Banglish works best). Ollama builds tone + example pairs for your tenant only — same mechanism as manual persona JSON."
         >
           <div className="space-y-4">
+            {/* Identity — name + role the bot uses when introducing itself.
+                Defaults to "Karim, Moderator of this Page" if both fields are blank. */}
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-4">
+              <div className="mb-3 flex items-center gap-2 font-medium text-slate-200">
+                <Bot className="h-4 w-4 text-accent" /> Identity (what the bot calls itself)
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block">
+                  <span className="label-caps mb-1.5 block">Bot name</span>
+                  <input
+                    type="text"
+                    value={settings.botPersona?.name ?? ""}
+                    onChange={(e) =>
+                      setSettings((prev) => {
+                        const next: SettingsShape = {
+                          ...prev,
+                          botPersona: { ...(prev.botPersona ?? {}), name: e.target.value },
+                        };
+                        setJson(JSON.stringify(next, null, 2));
+                        return next;
+                      })
+                    }
+                    placeholder="Karim"
+                    maxLength={40}
+                    className={inputCls}
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Default: Karim. The bot says &quot;Ami {settings.botPersona?.name?.trim() || "Karim"}&quot; when asked who it is.
+                  </p>
+                </label>
+                <label className="block">
+                  <span className="label-caps mb-1.5 block">Role / job title</span>
+                  <input
+                    type="text"
+                    value={settings.botPersona?.role ?? ""}
+                    onChange={(e) =>
+                      setSettings((prev) => {
+                        const next: SettingsShape = {
+                          ...prev,
+                          botPersona: { ...(prev.botPersona ?? {}), role: e.target.value },
+                        };
+                        setJson(JSON.stringify(next, null, 2));
+                        return next;
+                      })
+                    }
+                    placeholder="Moderator of this Page"
+                    maxLength={80}
+                    className={inputCls}
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Default: Moderator of this Page. Shown alongside the name in self-introductions.
+                  </p>
+                </label>
+              </div>
+              <p className="mt-3 text-[11px] leading-relaxed text-slate-500">
+                Customer asks &quot;ke apni?&quot; → bot replies <span className="font-mono text-slate-400">
+                  &quot;Ami {settings.botPersona?.name?.trim() || "Karim"}, {settings.botPersona?.role?.trim() || "Moderator of this Page"}.&quot;
+                </span>
+                {" "}Save changes from the page footer to apply.
+              </p>
+            </div>
+
             <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-sm text-slate-400">
               <div className="mb-1 flex items-center gap-2 font-medium text-slate-200">
                 <Bot className="h-4 w-4 text-accent" /> Current persona
@@ -1461,7 +1685,38 @@ export default function SettingsPage() {
       )}
 
       {tab === "courier" && (
-        <Section title="Pathao" description="Used for delivery booking after payment is verified.">
+        <>
+          <Section
+            title="Active courier"
+            description="Which courier the agent uses to auto-book parcels after payment is confirmed. You can configure both and switch any time."
+          >
+            <div className="grid grid-cols-2 gap-2 max-w-md">
+              {(
+                [
+                  { id: "pathao", label: "Pathao" },
+                  { id: "steadfast", label: "Steadfast" },
+                ] as const
+              ).map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() =>
+                    setSettings((prev) => ({ ...prev, courierProvider: c.id }))
+                  }
+                  className={cn(
+                    "rounded-xl border px-4 py-3 text-sm font-medium transition",
+                    (settings.courierProvider ?? "pathao") === c.id
+                      ? "border-indigo-500/50 bg-indigo-500/10 text-indigo-200"
+                      : "border-white/[0.08] bg-white/[0.02] text-slate-400 hover:border-white/[0.15] hover:text-slate-200",
+                  )}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          </Section>
+
+          <Section title="Pathao" description="Used for delivery booking after payment is verified.">
           <EnvToggle
             value={settings.pathao?.isLive ? "live" : "sandbox"}
             onChange={(mode) => {
@@ -1542,6 +1797,56 @@ export default function SettingsPage() {
             onTest={() => void testConnection("pathao")}
           />
         </Section>
+
+          <Section
+            title="Steadfast"
+            description="Steadfast (Packzy) courier integration. Provide API Key + Secret Key from your Steadfast merchant portal."
+          >
+            <div className="grid gap-4 md:grid-cols-2">
+              <Field label="API Key">
+                <input
+                  value={settings.steadfast?.apiKey ?? ""}
+                  onChange={(e) => updateNested("steadfast", "apiKey", e.target.value)}
+                  placeholder="from Steadfast portal → API"
+                  className={inputCls}
+                />
+              </Field>
+              <Field label="Secret Key">
+                <input
+                  type="password"
+                  value={settings.steadfast?.secretKey ?? ""}
+                  onChange={(e) => updateNested("steadfast", "secretKey", e.target.value)}
+                  placeholder="••••••••"
+                  className={inputCls}
+                />
+              </Field>
+              <Field label="Booking Mode">
+                <select
+                  value={settings.steadfast?.bookingMode ?? "automatic"}
+                  onChange={(e) => updateNested("steadfast", "bookingMode", e.target.value)}
+                  className={inputCls}
+                >
+                  <option value="automatic">Automatic — book immediately after payment</option>
+                  <option value="manual">Manual — admin books from order page</option>
+                  <option value="smart">Smart — auto for plain, manual for customized</option>
+                </select>
+              </Field>
+            </div>
+            <ConnectionTester
+              label="Steadfast"
+              state={steadfastTest}
+              disabled={!settings.steadfast?.apiKey || !settings.steadfast?.secretKey}
+              onTest={() => void testConnection("steadfast")}
+            />
+            <p className="mt-3 text-[11px] leading-relaxed text-slate-500">
+              Status webhook URL to register with Steadfast support during onboarding:
+              <code className="ml-1 rounded bg-black/30 px-1 py-0.5 text-[10px] text-indigo-300">
+                {"<your domain>"}/webhooks/steadfast/status
+              </code>
+              . Without it the order will still get marked DELIVERED via the polling fallback.
+            </p>
+          </Section>
+        </>
       )}
 
       {tab === "catalog" && (
@@ -2199,6 +2504,148 @@ function SocialAccountsSection({
 
 type AdvancePolicy = NonNullable<SettingsShape["advancePolicy"]>;
 type AdvanceMode = AdvancePolicy["mode"] | "off";
+
+type DeliveryTimes = NonNullable<SettingsShape["deliveryTimes"]>;
+type DeliveryRange = NonNullable<DeliveryTimes["normal"]>;
+
+/**
+ * Two-preset delivery-time editor: `Normal` for plain orders, `Customised`
+ * for orders containing add-ons (name+number, custom font, etc.).
+ *
+ * Each preset accepts an optional min and max in DAYS. Empty values are
+ * preserved as undefined so the agent can quote a single number ("3 din")
+ * instead of a range. Hitting "Clear" wipes both presets back to undefined
+ * so the agent falls back to whatever it knows from the catalog metadata.
+ */
+function DeliveryTimeEditor({
+  value,
+  onChange,
+}: {
+  value: DeliveryTimes | undefined;
+  onChange: (next: DeliveryTimes | undefined) => void;
+}) {
+  function patch(preset: "normal" | "customised", part: Partial<DeliveryRange>) {
+    const current = value ?? {};
+    const existing = (current[preset] ?? {}) as DeliveryRange;
+    const merged: DeliveryRange = { ...existing, ...part };
+    // Drop undefined keys so the JSON payload stays clean.
+    const cleaned: DeliveryRange = {};
+    if (merged.minDays !== undefined) cleaned.minDays = merged.minDays;
+    if (merged.maxDays !== undefined) cleaned.maxDays = merged.maxDays;
+    const next: DeliveryTimes = { ...current };
+    if (Object.keys(cleaned).length === 0) {
+      delete next[preset];
+    } else {
+      next[preset] = cleaned;
+    }
+    if (Object.keys(next).length === 0) {
+      onChange(undefined);
+    } else {
+      onChange(next);
+    }
+  }
+
+  function num(v: unknown): number | undefined {
+    if (v === "" || v === null || v === undefined) return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+  }
+
+  const cardCls =
+    "rounded-xl border border-white/[0.07] bg-white/[0.02] p-4";
+  const labelCls = "block text-xs font-semibold uppercase tracking-wide text-slate-400";
+  const inputClsLocal =
+    "w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30";
+
+  return (
+    <div className="md:col-span-2">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-200">Delivery time</p>
+          <p className="text-[11px] text-slate-500">
+            Quoted to customers when they ask &quot;kobe pabo?&quot; The agent picks{" "}
+            <span className="text-slate-300">Customised</span> automatically when the cart has
+            any add-on (name+number, custom font, etc.); otherwise it picks{" "}
+            <span className="text-slate-300">Normal</span>.
+          </p>
+        </div>
+        {value && (
+          <button
+            type="button"
+            onClick={() => onChange(undefined)}
+            className="text-[11px] font-medium text-slate-500 transition hover:text-slate-300"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        <div className={cardCls}>
+          <p className="text-xs font-semibold text-slate-200">Normal delivery</p>
+          <p className="mt-0.5 text-[11px] text-slate-500">Plain orders, no add-ons.</p>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <label className="space-y-1">
+              <span className={labelCls}>Min (days)</span>
+              <input
+                type="number"
+                min={0}
+                max={120}
+                value={value?.normal?.minDays ?? ""}
+                onChange={(e) => patch("normal", { minDays: num(e.target.value) })}
+                placeholder="1"
+                className={inputClsLocal}
+              />
+            </label>
+            <label className="space-y-1">
+              <span className={labelCls}>Max (days)</span>
+              <input
+                type="number"
+                min={0}
+                max={120}
+                value={value?.normal?.maxDays ?? ""}
+                onChange={(e) => patch("normal", { maxDays: num(e.target.value) })}
+                placeholder="3"
+                className={inputClsLocal}
+              />
+            </label>
+          </div>
+        </div>
+        <div className={cardCls}>
+          <p className="text-xs font-semibold text-slate-200">Customised delivery</p>
+          <p className="mt-0.5 text-[11px] text-slate-500">
+            Cart has any add-on (name+number, custom font, etc.).
+          </p>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <label className="space-y-1">
+              <span className={labelCls}>Min (days)</span>
+              <input
+                type="number"
+                min={0}
+                max={120}
+                value={value?.customised?.minDays ?? ""}
+                onChange={(e) => patch("customised", { minDays: num(e.target.value) })}
+                placeholder="5"
+                className={inputClsLocal}
+              />
+            </label>
+            <label className="space-y-1">
+              <span className={labelCls}>Max (days)</span>
+              <input
+                type="number"
+                min={0}
+                max={120}
+                value={value?.customised?.maxDays ?? ""}
+                onChange={(e) => patch("customised", { maxDays: num(e.target.value) })}
+                placeholder="7"
+                className={inputClsLocal}
+              />
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function AdvancePolicyEditor({
   value,

@@ -5,12 +5,17 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import pinoHttp from "pino-http";
 import { logger } from "./utils/logger.js";
+import { config } from "./config/index.js";
 import { errorHandler } from "./middlewares/errorHandler.js";
 import { adminRoutes } from "./routes/adminRoutes.js";
 import { facebookRoutes } from "./routes/facebookRoutes.js";
 import { sslcommerzRoutes } from "./routes/sslcommerzRoutes.js";
+import { aamarpayRoutes } from "./routes/aamarpayRoutes.js";
+import { bkashRoutes } from "./routes/bkashRoutes.js";
+import { steadfastRoutes } from "./routes/steadfastRoutes.js";
 import { clientRoutes } from "./routes/clientRoutes.js";
 import { tenantPortalRoutes } from "./routes/tenantPortalRoutes.js";
+import { authAuthenticatedRoutes, authPublicRoutes } from "./routes/authRoutes.js";
 import { agentDebugRoutes } from "./routes/agentDebugRoutes.js";
 import { telegramRoutes } from "./routes/telegramRoutes.js";
 import { serveMessengerCatalogImage } from "./controllers/catalogMessengerImageController.js";
@@ -33,7 +38,20 @@ export function createApp(): express.Application {
       },
     }),
   );
-  app.use(cors());
+  app.use(
+    cors({
+      origin: (origin, cb) => {
+        // No origin = same-origin / curl / server-side: allow.
+        if (!origin) return cb(null, true);
+        const allowed = config.corsAllowedOrigins;
+        // Empty allow-list = development convenience: accept anything.
+        if (allowed.length === 0) return cb(null, true);
+        if (allowed.includes(origin)) return cb(null, true);
+        return cb(new Error(`CORS: origin not allowed: ${origin}`));
+      },
+      credentials: true,
+    }),
+  );
   app.use(
     express.json({
       limit: "2mb",
@@ -82,8 +100,13 @@ export function createApp(): express.Application {
   app.use("/admin", adminRoutes);
   app.use("/webhooks/facebook", facebookRoutes);
   app.use("/webhooks/sslcommerz", sslcommerzRoutes);
+  app.use("/webhooks/aamarpay", aamarpayRoutes);
+  app.use("/webhooks/bkash", bkashRoutes);
+  app.use("/webhooks/steadfast", steadfastRoutes);
   app.use("/webhooks/telegram", telegramRoutes);
   app.use("/webhooks/client", clientRoutes);
+  app.use("/api/v1/auth", authPublicRoutes);
+  app.use("/api/v1/auth", authAuthenticatedRoutes);
   app.use("/api/v1", tenantPortalRoutes);
 
   app.use(errorHandler);

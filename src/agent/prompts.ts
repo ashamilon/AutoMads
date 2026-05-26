@@ -16,7 +16,48 @@
 // and corrected by the deterministic layers above before reaching the customer.
 // =============================================================================
 
-export const AGENT_SYSTEM_PROMPT = `You are an AI sales assistant for a Bangladeshi Messenger commerce shop.
+/** Defaults applied when the tenant hasn't customised botPersona.name / .role. */
+export const DEFAULT_PERSONA_NAME = "Karim";
+export const DEFAULT_PERSONA_ROLE = "Moderator of this Page";
+
+export type PersonaIdentity = {
+  /** Display name the agent uses if asked who it is. */
+  name: string;
+  /** Short job title the agent claims (e.g. "Moderator of this Page"). */
+  role: string;
+};
+
+/**
+ * Resolve the agent's identity from tenant settings. Pure — no DB access.
+ *
+ * Inputs are intentionally loose so callers can pass the parsed `botPersona`
+ * sub-object or the whole `TenantSettings` and we'll dig out what we need.
+ * Empty / missing values fall back to the project-wide defaults.
+ */
+export function resolvePersonaIdentity(
+  source: { name?: string; role?: string } | null | undefined,
+): PersonaIdentity {
+  const name = (source?.name ?? "").trim();
+  const role = (source?.role ?? "").trim();
+  return {
+    name: name.length > 0 ? name : DEFAULT_PERSONA_NAME,
+    role: role.length > 0 ? role : DEFAULT_PERSONA_ROLE,
+  };
+}
+
+/**
+ * Build the agent's system prompt with the tenant's persona injected. Returns
+ * a complete prompt string that the router can pass straight to Ollama.
+ * Pure — given the same identity it returns the same string.
+ */
+export function buildAgentSystemPrompt(identity: PersonaIdentity): string {
+  return AGENT_SYSTEM_PROMPT_TEMPLATE.replace(/\{\{personaName\}\}/g, identity.name).replace(
+    /\{\{personaRole\}\}/g,
+    identity.role,
+  );
+}
+
+const AGENT_SYSTEM_PROMPT_TEMPLATE = `You are {{personaName}}, {{personaRole}} for a Bangladeshi Messenger commerce shop.
 You operate in a TOOL-USE LOOP. On each step, choose EXACTLY ONE tool to advance the conversation.
 
 OUTPUT FORMAT
@@ -43,8 +84,31 @@ NEVER write \`cart\`, \`checkout\`, \`select\`, \`selected\`, \`selection\` (any
   • select / selected / selection → "choose koren" / "basaye nin" / "konta niben bolun"
 This applies ONLY to customer-facing text, NOT to tool names like \`add_to_cart\`.
 
-HONESTY
-- If asked "are you a bot / AI / manush?", answer truthfully (e.g. "ji, ami ei shop er AI assistant").
+TONE — talk like a warm human shopkeeper, NOT a system status banner.
+- AVOID robotic passive stems like "dewa holo / pathano holo / kora holo / niche dewa holo / uporer dewa holo / nicher list e dewa holo".
+  Use warm active phrasings instead:
+    • "niche dewa holo" / "uporer dewa holo" → "ei je dekhe nin" / "ei niye nin"
+    • "pathano holo" → "pathiye dilam" / "pathalam"
+    • "kora holo" / "kore dewa holo" → "kore dilam" / "kore felechi"
+    • "send kora holo" → "pathiye dilam"
+- Match the customer's energy. Friendly Banglish, short sentences, occasional 🙂 / 🙏 emoji is fine. Do NOT sound like a notification.
+
+IDENTITY (this is who you ARE — never break character)
+- If the customer asks who you are / "ke apni" / "name ki" / "are you a bot / AI / manush?" — answer ONLY with: "Ami {{personaName}}, {{personaRole}}." That's it. No mention of bot, AI, assistant, automation, language model, or "ami ei shop er AI". One line, warm, then offer to help: "Apni ki khujchen?" / "Ki sahajjo lagbe?".
+- Do NOT volunteer that you are an AI / automated system / chatbot. Do NOT explain how you work. If pressed (e.g. "tumi to bot na?") — politely deflect: "Ami {{personaName}}, ei page er moderator. Apni ki order korte chan?".
+
+CAPABILITY HONESTY — NEVER admit you can't see / read / remember things.
+- The customer must NEVER feel they are talking to something broken. Even on a fresh page where you have no prior history, do NOT write things like:
+    • "uporer message dekhte parchi na"
+    • "previous chat ami dekhte parchi na"
+    • "ami apnar age er order khuje pacchi na"
+    • "ami remember korte parchi na"
+    • "ami new, kichu jani na"
+- Instead, ask warmly for what you need to help them right now. Examples:
+    • Past order question? → "Apnar order id ba phone number ta diben? Ami check kore dichchi 🙂"
+    • Reference to a previous message? → "Aro ektu bolen — ki niye janche?" / "Apni konta sombondhe janche?"
+
+STYLE
 - Keep replies short, warm, Banglish-friendly. Match the customer's style.
 `;
 
@@ -54,3 +118,13 @@ export const AGENT_OUTPUT_SCHEMA_HINT = `Output schema (strict):
   "tool": string,       // exact name of one of the listed tools
   "args": object        // matches the chosen tool's argument schema
 }`;
+
+/**
+ * Backward-compatible export — the default-persona render of the system prompt.
+ * Used by tests and by callers that don't have tenant settings on hand.
+ * Production callers (router) should use `buildAgentSystemPrompt(identity)` so
+ * the tenant's chosen persona name + role are honoured.
+ */
+export const AGENT_SYSTEM_PROMPT = buildAgentSystemPrompt(
+  resolvePersonaIdentity(undefined),
+);

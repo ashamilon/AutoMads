@@ -107,7 +107,13 @@ function stepToRow(args: {
  * - `fsm_block`: the FSM rejected an LLM-suggested transition and forced the next
  *   deterministic state (task 5.3).
  */
-export type AgentOverrideKind = "anti_hallucination" | "anti_loop" | "banned_word" | "fsm_block";
+export type AgentOverrideKind =
+  | "anti_hallucination"
+  | "anti_loop"
+  | "banned_word"
+  | "tone_rewrite"
+  | "capability_confession"
+  | "fsm_block";
 
 /**
  * Persist a single deterministic-override event as an `AgentTrace` row.

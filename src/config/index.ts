@@ -11,6 +11,18 @@ export const config = {
   port: Number(process.env.PORT ?? 4000),
   databaseUrl: required("DATABASE_URL"),
   publicBaseUrl: process.env.PUBLIC_BASE_URL ?? "http://localhost:4000",
+  /** External https URL of the Next.js portal (where /activate, /login live).
+   *  Defaults to PUBLIC_PORTAL_URL or the API base URL for dev where they
+   *  share a host. Must be set in production where the portal lives on a
+   *  different domain than the API. */
+  publicPortalUrl: process.env.PUBLIC_PORTAL_URL ?? process.env.PUBLIC_BASE_URL ?? "http://localhost:3000",
+  /** Comma-separated list of allowed origins for browser CORS calls. The
+   *  dashboard subdomain MUST be in here in production so the Next.js portal
+   *  can call the API with credentials. Empty = allow all (dev-friendly). */
+  corsAllowedOrigins: (process.env.CORS_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
   ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434",
   /** Must match `ollama list` exactly, e.g. gemma4:31b-cloud */
   ollamaModel: process.env.OLLAMA_MODEL ?? "gemma4:31b-cloud",

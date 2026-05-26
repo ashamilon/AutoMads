@@ -347,21 +347,45 @@ export async function extractOrderFromTextAndImages(
   }
 }
 
-const JERSEY_IDENTIFY_SYSTEM = `You look at ONE OR MORE PHOTOS the customer sent of a football (soccer) jersey (full kit, torso crop, hanger photo, folded shirt, sleeve/badge close-up — partial photo is OK).
+const JERSEY_IDENTIFY_SYSTEM = `You are a precision football-jersey identifier. Be CONSERVATIVE — when in doubt, output a lower kind / lower confidence rather than guess.
 
-Task:
-1) Decide whether the image clearly shows an association football jersey (shirt with team/national symbolism), or something else / too unclear.
-2) If it is a jersey, identify the NATIONAL TEAM (e.g. Spain, Brazil, Argentina) OR the CLUB (e.g. Real Madrid, Barcelona, Manchester United) from crest, federation logo, colors, sponsor layout, or text on the shirt.
-3) Return ENGLISH names in primaryNames (e.g. "Spain", "Spanish national team" OR "Real Madrid"). Use 1–4 short strings. Do not invent brands not visible.
+You will see ONE OR MORE PHOTOS the customer sent. The image MAY be:
+  • a football (soccer) jersey — full kit, torso crop, hanger, folded, sleeve / badge close-up — partial photo is OK
+  • a different garment (t-shirt, polo, hoodie, dress)
+  • a person photo (selfie, model, bystander) with no jersey
+  • a screen / random / blurry / OCR-friendly junk
+
+STEP 1 — gate. Decide whether the image clearly shows an association football (soccer) jersey:
+  - If you can see a football crest / federation badge / club crest / clear football kit pattern → continue.
+  - If it's a t-shirt without crest → kind="not_jersey". Random garment / person / screenshot → kind="not_jersey".
+  - If a jersey is plausible but image too dark/blurry/cropped to tell → kind="unknown".
+
+STEP 2 — identify (only if jersey detected):
+  - NATIONAL TEAM (e.g. Spain, Brazil, Argentina) — federation badge / flag colors / "ARGENTINA" wordmark.
+  - CLUB (e.g. Real Madrid, Barcelona, Manchester United) — crest pattern, sponsor, distinctive stripes.
+  - "primaryNames" — 1 to 4 short ENGLISH strings (e.g. ["Spain"] or ["Real Madrid"]). Do NOT invent.
+
+STEP 3 — confidence:
+  - "high"   → crest clearly readable AND dominant colors / sponsor / wordmark all consistent with one team. Multiple discriminators agree.
+  - "medium" → strong color cue (e.g. all-white + Adidas + Spanish flag accent → likely Real Madrid) but crest not crisp.
+  - "low"    → only one weak cue (e.g. "blue jersey", "white shirt") with no badge or wordmark visible.
+
+STEP 4 — detectedFeatures (always fill what you can see):
+  - hasCrest: true only when an actual badge is visible.
+  - crestDescription: 3-12 word description ("Real Madrid lion + Adidas stripes" / "FIFA crest, ARG wordmark").
+  - dominantColors: up to 4 ("white", "navy", "red", "yellow").
+  - sponsor: brand on the chest if readable ("Emirates Fly Better", "Standard Chartered", "Spotify").
+  - kitVariant: home / away / third / retro / goalkeeper / unknown.
 
 Output ONE JSON object only:
-{"kind":"national_team"|"club"|"ambiguous"|"not_jersey"|"unknown","primaryNames":["..."],"notes":"optional short reason"}
+{"kind":"national_team"|"club"|"ambiguous"|"not_jersey"|"unknown","primaryNames":["..."],"confidence":"high"|"medium"|"low","detectedFeatures":{"hasCrest":bool,"crestDescription":"...","dominantColors":["..."],"sponsor":"...","kitVariant":"home|away|third|retro|goalkeeper|unknown"},"notes":"optional short reason"}
 
-Rules:
-- kind "not_jersey" if not a football jersey or random object.
-- kind "unknown" if probably a jersey but cannot tell which team.
-- kind "ambiguous" if you see a jersey but could be two different well-known teams.
-- primaryNames empty array if not_jersey or unknown.`;
+Hard rules:
+- "not_jersey" → primaryNames MUST be empty array.
+- "unknown" → primaryNames MUST be empty array.
+- "ambiguous" → primaryNames MAY contain 2-4 candidate teams; confidence MUST be "low" or "medium".
+- Never set confidence "high" for a kit you cannot fully discriminate (e.g. plain blue jersey with no badge).
+- Never invent a team name. If unsure, downgrade kind/confidence rather than guess.`;
 
 /**
  * Vision pass: country/club (or not a jersey) from customer photos.
@@ -524,22 +548,36 @@ async function matchCatalogOnce(
  * Visual side-by-side compare: customer photo vs each shortlisted candidate's reference image.
  * Returns the picked clientSku (must be in validSkus), or null if none confidently match.
  */
-const CATALOG_VISUAL_PICK_SYSTEM = `You match a CUSTOMER PHOTO of a football jersey against several CATALOG REFERENCE PHOTOS.
-You receive multiple images in this exact order:
-  Image 1: customer's jersey photo
-  Image 2..N: catalog reference photos (one per candidate, in the same order as the candidate list)
+const CATALOG_VISUAL_PICK_SYSTEM = `You are a precision matcher. The customer photo (Image 1) MUST match exactly one CANDIDATE catalog photo (Image 2..N). Be CONSERVATIVE — return empty when discriminators don't agree.
 
-You ALSO receive a numbered candidate list with: index, clientSku, label, key descriptors.
-Pick the ONE candidate whose reference photo (and label) best matches the customer photo by:
-- crest / federation badge
-- dominant colors and color zones
-- home / away / third / retro variant
-- sleeve / collar style
-- sponsor placement / number font when visible
+You receive in this exact order:
+  Image 1: customer's jersey photo
+  Image 2..N: catalog reference photos (one per candidate, same order as the candidate list)
+
+You also receive a numbered candidate list with: index, clientSku, label, and key descriptors.
+
+Match procedure (run all checks, ALL must agree before "high"):
+  1. Crest — same shape / federation badge / club badge?
+  2. Dominant colors — same primary + secondary colors?
+  3. Pattern — stripes / chevron / sash / solid / gradient — same family?
+  4. Sponsor / wordmark — readable text on chest matches?
+  5. Kit variant — home / away / third / retro — consistent?
+
+Confidence:
+  - "high"   — at least 3 of the 5 checks clearly agree AND no check disagrees.
+  - "medium" — 2 checks agree, 0 disagree (rest unclear).
+  - "low"    — only 1 check agrees, or any check actively disagrees.
 
 Output ONE JSON object only:
-{"clientSku":"<exact sku from list>","confidence":"high"|"medium"|"low"}
-Use clientSku "" if no candidate clearly matches.`;
+{"clientSku":"<exact sku from list>","confidence":"high"|"medium"|"low","reason":"one short line of why"}
+
+Hard rules:
+- Use clientSku "" (empty string) when:
+  * Customer photo is not a jersey at all (random object / person / screenshot).
+  * No candidate clearly matches — even if one is "closest", do NOT guess.
+  * The crest in the customer photo contradicts every candidate's crest.
+- Never invent SKUs not present in the candidate list.
+- Returning "" is the SAFE answer — the agent will ask the customer to clarify rather than ship the wrong jersey.`;
 
 export async function pickCatalogByVisualComparison(args: {
   customerImageBase64: string;
@@ -585,13 +623,24 @@ export async function pickCatalogByVisualComparison(args: {
     );
     const content = res.data?.message?.content;
     const parsed = parseJsonObjectFromLlmContent(content) as
-      | { clientSku?: unknown; confidence?: unknown }
+      | { clientSku?: unknown; confidence?: unknown; reason?: unknown }
       | null;
     const sku = typeof parsed?.clientSku === "string" ? parsed.clientSku.trim() : "";
     const confidence =
       typeof parsed?.confidence === "string" ? parsed.confidence.trim().toLowerCase() : "";
+    const reason = typeof parsed?.reason === "string" ? parsed.reason.slice(0, 160) : "";
     if (!sku || !args.validSkus.has(sku)) return null;
-    if (confidence === "low") return null;
+    // Conservative: only auto-pick on `high`. `medium` and `low` fall through
+    // so the caller can choose to ask the customer to confirm rather than
+    // silently dropping the wrong jersey into the cart.
+    if (confidence !== "high") {
+      logger.info(
+        { sku, confidence, reason },
+        "pickCatalogByVisualComparison: confidence below high → not auto-selecting",
+      );
+      return null;
+    }
+    logger.info({ sku, confidence, reason }, "pickCatalogByVisualComparison: high-confidence pick");
     return sku;
   } catch (e) {
     logger.warn({ e: String(e) }, "pickCatalogByVisualComparison failed");

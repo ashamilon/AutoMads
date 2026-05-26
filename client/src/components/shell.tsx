@@ -16,8 +16,10 @@ import {
   Zap,
 } from "lucide-react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useState, useTransition, type MouseEvent } from "react";
 import { Topbar } from "@/components/topbar";
+import { GraceBanner } from "@/components/grace-banner";
 
 type NavItem = { href: string; label: string; icon: typeof LayoutDashboard };
 type NavGroup = { title: string; items: NavItem[] };
@@ -46,9 +48,32 @@ const groups: NavGroup[] = [
 
 export function PortalShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const { tenant } = useTenant();
   const brandLogoUrl = getBrandLogoUrl();
   const brandNameUrl = getBrandNameUrl();
+  // Track which href the user just clicked so we can flash the destination
+  // link as "active" instantly — even before Next.js finishes its route
+  // transition. Cleared as soon as `pathname` catches up.
+  const [pendingHref, setPendingHref] = useState<string | null>(null);
+  const [, startTransition] = useTransition();
+
+  // Once the URL has caught up to the click target, drop the optimistic flag.
+  if (pendingHref && pathname === pendingHref) {
+    // Schedule the reset for after this render; calling setState during render
+    // is allowed but only when guarded by an equality check like this.
+    queueMicrotask(() => setPendingHref(null));
+  }
+
+  function navigate(e: MouseEvent<HTMLAnchorElement>, href: string) {
+    // Honor cmd/ctrl/middle-click — let the browser handle it.
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
+    e.preventDefault();
+    setPendingHref(href);
+    startTransition(() => {
+      router.push(href);
+    });
+  }
 
   return (
     <div className="flex min-h-screen">
@@ -87,14 +112,20 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
               <p className="label-caps mb-2 px-3">{g.title}</p>
               <div className="flex flex-col gap-0.5">
                 {g.items.map(({ href, label, icon: Icon }) => {
-                  const active =
+                  const realActive =
                     pathname === href || (href !== "/portal" && pathname?.startsWith(href));
+                  // Show optimistic "active" treatment while the click is in
+                  // flight so the user gets instant feedback even on slow pages.
+                  const optimisticActive = pendingHref === href;
+                  const active = realActive || optimisticActive;
                   return (
                     <Link
                       key={href}
                       href={href}
+                      prefetch
+                      onClick={(e) => navigate(e, href)}
                       className={cn(
-                        "group relative flex items-center gap-3 rounded-xl px-3 py-2 text-[0.9rem] font-medium tracking-snug transition",
+                        "group relative flex items-center gap-3 rounded-xl px-3 py-2 text-[0.9rem] font-medium tracking-snug transition-all duration-150 ease-out active:scale-[0.98] active:bg-white/[0.09]",
                         active
                           ? "bg-white/[0.07] text-white"
                           : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200",
@@ -148,7 +179,10 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
           }}
         />
         <Topbar />
-        <div className="mx-auto max-w-6xl">{children}</div>
+        <div className="mx-auto max-w-6xl">
+          <GraceBanner />
+          {children}
+        </div>
       </main>
     </div>
   );

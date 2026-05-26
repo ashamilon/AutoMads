@@ -61,6 +61,16 @@ import {
 } from "./conversationLearningService.js";
 import { isAgentEnabledForTenant, runAgentInbound } from "../agent/runner.js";
 import { resolveProductAddons } from "../agent/addonResolver.js";
+import {
+  buildHandoffTelegramText,
+  HANDOFF_CUSTOMER_REPLY,
+  hasInFlightOrder,
+  isAgentMuted,
+  isTenantInGraceWindow,
+  looksLikePastOrderQuestion,
+  muteAgent,
+} from "../agent/handoffPolicy.js";
+import { loadSnapshot } from "../agent/state.js";
 
 function buildTranId(orderId: string): string {
   return `TXN_${orderId.slice(0, 12)}_${Date.now()}`;
@@ -590,6 +600,15 @@ type PerPhotoCatalogMatch = {
 /**
  * One customer photo → team/club from vision → catalog candidates → best match
  * (visual compare when several SKUs share the same team).
+ *
+ * HARD GATE: when the vision pass says the photo isn't a football jersey at
+ * all (a person, a t-shirt, a screenshot, etc.), this returns null without
+ * touching the catalog matcher — that matcher is greedy and will happily
+ * pick "the closest catalog row" for any image, which produced false
+ * positives like "girl photo → jersey SKU" before this guard.
+ *
+ * Same for `kind === "unknown"` with low confidence: we'd rather come back
+ * empty and ask the customer for a clearer photo than bake in a wrong SKU.
  */
 async function resolveBestCatalogMatchForSingleCustomerImage(args: {
   imageBase64: string;
@@ -610,9 +629,28 @@ async function resolveBestCatalogMatchForSingleCustomerImage(args: {
   const teamLabel = visionNames.slice(0, 2).join(" / ").trim();
   const jerseyDetected = vision && vision.kind !== "not_jersey" && visionNames.length > 0;
 
+  // ── HARD GATE 1: photo isn't a jersey ───────────────────────────────────
+  // A girl photo, a t-shirt, a screenshot — none of these should land on a
+  // catalog SKU. The matcher would happily pick the closest row, so we stop
+  // here. The caller surfaces a friendly "send a clearer jersey photo" reply.
+  if (vision?.kind === "not_jersey") {
+    logger.info(
+      {
+        kind: vision.kind,
+        confidence: vision.confidence,
+        notes: vision.notes?.slice(0, 80),
+      },
+      "Vision: photo is not a jersey — skipping catalog match",
+    );
+    return null;
+  }
+
   if (jerseyDetected) {
     const candidates = findCatalogByJerseyEntities(mappings, visionNames, MAX_CATALOG_OPTION_LIST);
     if (candidates.length === 1) {
+      // Single team match in our catalog AND the vision pass had at least
+      // medium confidence — safe to commit. If confidence is low we still
+      // commit because the catalog narrowed it for us.
       return { row: candidates[0]!, teamLabel };
     }
     if (candidates.length >= 2) {
@@ -628,6 +666,28 @@ async function resolveBestCatalogMatchForSingleCustomerImage(args: {
       const textBest = findBestCatalogMatchByText(candidates, teamLabel || visionNames.join(" "));
       if (textBest) return { row: textBest, teamLabel };
     }
+  }
+
+  // ── HARD GATE 2: vision pass had no useful identification ───────────────
+  // `vision.kind === "unknown"` AND no team named — we don't trust the
+  // catalog matcher to pick correctly from a vague image. Return null so the
+  // caller can ask for a clearer photo. Without this, a blurry "is this a
+  // jersey or a hoodie?" image would still get force-matched.
+  if (vision && vision.kind === "unknown" && visionNames.length === 0) {
+    logger.info(
+      { kind: vision.kind, confidence: vision.confidence },
+      "Vision: jersey unknown — skipping catalog match (will ask customer)",
+    );
+    return null;
+  }
+
+  // Caption-led fallback: only when the customer's TEXT mentioned something
+  // catalog-like. If the customer sent only an image and vision didn't ID it,
+  // we shouldn't blindly match by image alone here.
+  const captionHasContent = (caption?.trim().length ?? 0) >= 3;
+  if (!captionHasContent && !jerseyDetected) {
+    logger.info("Vision: no caption + no jersey ID — skipping catalog match");
+    return null;
   }
 
   const catalogMatchCaption = jerseyDetected
@@ -1044,6 +1104,43 @@ export async function sendManualPaymentTelegramAlert(args: {
       ? "Manual payment detected"
       : "Manual payment reference detected (no open order match)";
   const screenshotLines = (args.screenshotUrls ?? []).slice(0, 4).map((u, i) => `Screenshot ${i + 1}: ${u}`);
+
+  // Render every line in the cart (Req: multi-product orders must show all
+  // products in the alert, not just structuredData.product which mirrors the
+  // first item only). Falls back to the flat top-level scalars when `items`
+  // is missing (legacy orders pre-multi-line schema).
+  const items = Array.isArray(sd["items"]) ? (sd["items"] as Array<Record<string, unknown>>) : [];
+  const productLines: string[] = [];
+  if (items.length > 0) {
+    productLines.push(`Items (${items.length}):`);
+    items.forEach((it, idx) => {
+      const product = String(it["product"] ?? "").trim() || "(unnamed)";
+      const size = String(it["size"] ?? "").trim();
+      const qty = Number(it["quantity"] ?? 1);
+      const unit = Number(it["unitPriceBdt"] ?? 0);
+      const addOnPerUnit = Number(it["unitAddOnBdt"] ?? 0);
+      const lineTotal = (unit + addOnPerUnit) * (Number.isFinite(qty) && qty > 0 ? qty : 1);
+      const sizeStr = size ? ` (${size})` : "";
+      const qtyStr = Number.isFinite(qty) && qty > 1 ? ` x${qty}` : "";
+      productLines.push(`  ${idx + 1}. ${product}${sizeStr}${qtyStr} — ${lineTotal} BDT`);
+      const addOns = Array.isArray(it["addOns"]) ? (it["addOns"] as Array<Record<string, unknown>>) : [];
+      for (const ao of addOns) {
+        const label = String(ao["label"] ?? "").trim();
+        if (!label) continue;
+        const value = String(ao["value"] ?? "").trim();
+        const aoPrice = Number(ao["priceBdt"] ?? 0);
+        const valStr = value ? ` "${value}"` : "";
+        const priceStr = Number.isFinite(aoPrice) && aoPrice > 0 ? ` +${aoPrice} BDT` : "";
+        productLines.push(`     • ${label}${valStr}${priceStr}`);
+      }
+    });
+  } else if (sd["product"]) {
+    // Legacy fallback — pre-multi-line orders only carried scalar product/size/quantity.
+    const sizeStr = sd["size"] ? ` (${String(sd["size"])})` : "";
+    const qtyStr = sd["quantity"] != null ? ` x${String(sd["quantity"])}` : "";
+    productLines.push(`Product: ${String(sd["product"])}${sizeStr}${qtyStr}`);
+  }
+
   const tgLines = [
     title,
     args.orderId ? `Order: ${args.orderId}` : "",
@@ -1054,9 +1151,7 @@ export async function sendManualPaymentTelegramAlert(args: {
     sd["name"] ? `Name: ${String(sd["name"])}` : "",
     sd["phone"] ? `Phone: ${String(sd["phone"])}` : "",
     sd["address"] ? `Address: ${String(sd["address"])}` : "",
-    sd["product"] ? `Product: ${String(sd["product"])}` : "",
-    sd["size"] ? `Size: ${String(sd["size"])}` : "",
-    sd["quantity"] != null ? `Qty: ${String(sd["quantity"])}` : "",
+    ...productLines,
     sd["amount"] ? `Amount: ${String(sd["amount"])}` : "",
     ...screenshotLines,
     "",
@@ -3075,6 +3170,103 @@ export async function handleInboundMessengerMessage(params: {
     }
   }
 
+  // ── Per-conversation mute (handoff window) ──────────────────────────────
+  // Set by `muteAgent()` after a past-order escalation. While active, we
+  // record the inbound (above) but do NOT respond. Admin handles the
+  // conversation directly via Messenger.
+  {
+    const muted = await isAgentMuted(conversationId);
+    if (muted) {
+      logger.info(
+        { tenantId: params.tenantId, conversationId, psid: params.psid },
+        "agent muted — skipping reply",
+      );
+      return;
+    }
+  }
+
+  // ── Post-connection grace handoff ───────────────────────────────────────
+  // For 48h after the tenant connected their Page, a past-order question
+  // from a returning customer escalates to admin (we don't have their
+  // pre-connection order in our DB so the agent would just say "no order
+  // found", which is rude). Telegram alert + Banglish ack + 10h mute.
+  //
+  // CRITICAL GUARD: only escalate when the conversation is NOT already
+  // mid-flow. A customer who's actively building a cart and just sent us
+  // their name + phone + address cannot be a "past order" question — the
+  // agent literally just asked them for those details. Without this guard,
+  // a phone number leaking into a regex (or a phrase like "amar order"
+  // mid-checkout) was hijacking fresh orders into admin handoff.
+  if (trimmed && (await isTenantInGraceWindow(params.tenantId))) {
+    if (looksLikePastOrderQuestion(trimmed)) {
+      const snap = await loadSnapshot(conversationId);
+      const inFlight = hasInFlightOrder(snap);
+      if (inFlight) {
+        logger.info(
+          {
+            tenantId: params.tenantId,
+            conversationId,
+            psid: params.psid,
+            cart: snap.cart.length,
+            order_state: snap.order_state,
+            snippet: trimmed.slice(0, 80),
+          },
+          "grace window: matched past-order regex but conversation has an in-flight order — skipping handoff",
+        );
+      } else {
+        logger.info(
+          { tenantId: params.tenantId, conversationId, psid: params.psid, snippet: trimmed.slice(0, 80) },
+          "grace window: past-order question → handoff",
+        );
+      // Send the ack (best-effort, within the 24h messaging window).
+      try {
+        await sendMessengerText({
+          pageAccessToken: effectivePageToken,
+          psid: params.psid,
+          text: HANDOFF_CUSTOMER_REPLY,
+          within24hWindow: within24h,
+        });
+        await prisma.messengerMessage
+          .create({
+            data: { conversationId, role: "assistant", text: HANDOFF_CUSTOMER_REPLY },
+          })
+          .catch(() => undefined);
+        await prisma.messengerConversation
+          .update({ where: { id: conversationId }, data: { lastBotMsgAt: new Date() } })
+          .catch(() => undefined);
+      } catch (e) {
+        logger.warn({ e: String(e), conversationId }, "grace handoff: messenger ack failed");
+      }
+      // Telegram alert. Best-effort — if the tenant hasn't configured
+      // Telegram, this is a no-op.
+      try {
+        const tg = settings.telegram;
+        if (tg?.enabled && tg.botToken?.trim() && tg.chatId?.trim()) {
+          const text = buildHandoffTelegramText({
+            tenantSlug: params.tenantSlug,
+            psid: params.psid,
+            customerText: trimmed,
+            conversationUrl: null,
+          });
+          await sendTelegramMessage({
+            botToken: tg.botToken.trim(),
+            chatId: tg.chatId.trim(),
+            text,
+          }).catch((e) =>
+            logger.warn({ e: String(e), conversationId }, "grace handoff: telegram alert failed"),
+          );
+        }
+      } catch (e) {
+        logger.warn({ e: String(e), conversationId }, "grace handoff: telegram outer failed");
+      }
+      // Mute for 10h. Idempotent — repeated past-order questions during the
+      // mute don't extend it.
+      await muteAgent(conversationId);
+      return;
+      } // end of `else { ...escalate... }`
+    }
+  }
+
   await runWithMessengerReplyTo(params.customerMessageMid, async () => {
   const pageAccessToken = effectivePageToken;
   // Manual payment detection MUST run before the catalog/intent short-circuit;
@@ -4094,22 +4286,48 @@ export async function handleInboundMessengerMessage(params: {
         visionNames.length > 0 &&
         jerseyVision &&
         jerseyVision.kind !== "not_jersey";
-      const catalogMatchCaption = useVisionCaption
-        ? [trimmed, `Jersey in photo (identified): ${visionNames.join(", ")}`].filter(Boolean).join(" | ")
-        : trimmed || undefined;
-      const matchedSku = await matchClientSkuFromCatalog({
-        catalogLines,
-        text: catalogMatchCaption,
-        imagesBase64: imagesB64,
-        validSkus,
-      });
-      row =
-        (matchedSku ? mappings.find((m) => m.clientSku === matchedSku) : undefined) ??
-        (matchedSku
-          ? await prisma.productMapping.findFirst({
-              where: { tenantId: params.tenantId, clientSku: matchedSku },
-            })
-          : null);
+      // HARD GATE: when the customer sent ONLY images (no text) and the
+      // vision pass said "not a jersey", do NOT bounce into matchClientSkuFromCatalog
+      // — that matcher will pick the closest SKU even for random photos. We'd
+      // rather fall through to the friendly "send a clearer jersey photo" reply.
+      const visionSaysNotJersey =
+        hasIncomingImages && jerseyVision != null && jerseyVision.kind === "not_jersey";
+      const captionHasContent = (trimmed?.trim().length ?? 0) >= 3;
+      if (visionSaysNotJersey && !captionHasContent && jerseyVision) {
+        logger.info(
+          { kind: jerseyVision.kind, confidence: jerseyVision.confidence },
+          "Single-image fallback: photo is not a jersey — skipping forced catalog match",
+        );
+        // Send a warm Banglish nudge so the customer sends a clearer jersey
+        // photo or types what they want. One reply, then short-circuit.
+        const friendly =
+          "Photo te clear jersey ta dekhte parchi na 🙂 jersey er front side er ekta clear photo pathaben? Nahole product name likhe pathale ami catalog theke khuje dichchi.";
+        await sendMessengerText({
+          pageAccessToken,
+          psid: params.psid,
+          text: friendly,
+          within24hWindow: within24h,
+        });
+        await logAssistantTurn(conversationId, friendly);
+        return;
+      } else {
+        const catalogMatchCaption = useVisionCaption
+          ? [trimmed, `Jersey in photo (identified): ${visionNames.join(", ")}`].filter(Boolean).join(" | ")
+          : trimmed || undefined;
+        const matchedSku = await matchClientSkuFromCatalog({
+          catalogLines,
+          text: catalogMatchCaption,
+          imagesBase64: imagesB64,
+          validSkus,
+        });
+        row =
+          (matchedSku ? mappings.find((m) => m.clientSku === matchedSku) : undefined) ??
+          (matchedSku
+            ? await prisma.productMapping.findFirst({
+                where: { tenantId: params.tenantId, clientSku: matchedSku },
+              })
+            : null);
+      }
     }
 
     // Photo: no single SKU match but vision named a team → offer filtered catalog choices
@@ -5018,12 +5236,30 @@ async function runPostPaymentPipeline(opts: {
           (pathaoCfgRaw.isLive ? "https://api-hermes.pathao.com" : "https://courier-api-sandbox.pathao.com"),
       }
     : undefined;
-  const bookingMode = pathaoCfgRaw?.bookingMode ?? "automatic";
+  const steadfastCfg = settings.steadfast;
+  const hasSteadfast = Boolean(steadfastCfg?.apiKey?.trim() && steadfastCfg?.secretKey?.trim());
+
+  // Pick the active courier. `settings.courierProvider` wins; otherwise fall
+  // back to whichever courier is configured. If both are configured and no
+  // explicit choice was made, default to Pathao for backward compatibility.
+  const courierProvider: "pathao" | "steadfast" | "none" = (() => {
+    const explicit = (settings as { courierProvider?: "pathao" | "steadfast" }).courierProvider;
+    if (explicit === "pathao" && pathaoCfg) return "pathao";
+    if (explicit === "steadfast" && hasSteadfast) return "steadfast";
+    if (pathaoCfg) return "pathao";
+    if (hasSteadfast) return "steadfast";
+    return "none";
+  })();
+
+  const bookingMode =
+    courierProvider === "steadfast"
+      ? steadfastCfg?.bookingMode ?? "automatic"
+      : pathaoCfgRaw?.bookingMode ?? "automatic";
   const hasCustomizedItems = items.some((it) => Array.isArray(it.addOns) && it.addOns.length > 0);
   const shouldAutoBook =
     bookingMode === "automatic" || (bookingMode === "smart" && !hasCustomizedItems);
 
-  if (pathaoCfg && shouldAutoBook) {
+  if (courierProvider === "pathao" && pathaoCfg && shouldAutoBook) {
     try {
       const subtotal = Number(order.totalAmount?.toString() ?? "0");
       const deliveryCharge = typeof settings.deliveryChargeBdt === "number" ? settings.deliveryChargeBdt : 0;
@@ -5081,7 +5317,63 @@ async function runPostPaymentPipeline(opts: {
         data: { failureReason: `pathao:${String(e)}` },
       });
     }
-  } else if (pathaoCfg && !shouldAutoBook) {
+  } else if (courierProvider === "steadfast" && hasSteadfast && shouldAutoBook) {
+    try {
+      const recipientName = structured.name?.trim() || "Customer";
+      const recipientPhone = structured.phone?.trim() || "";
+      const recipientAddress = structured.address?.trim() || "";
+      if (!recipientPhone || !recipientAddress) {
+        throw new Error("Steadfast booking skipped: missing recipient phone/address in confirmed order");
+      }
+      const subtotal = Number(order.totalAmount?.toString() ?? "0");
+      const deliveryCharge = typeof settings.deliveryChargeBdt === "number" ? settings.deliveryChargeBdt : 0;
+      const configuredAdvance =
+        typeof settings.advancePaymentBdt === "number" ? settings.advancePaymentBdt : subtotal;
+      const payableTotal = subtotal + deliveryCharge;
+      const cashAmount = Math.max(payableTotal - Math.min(configuredAdvance, payableTotal), 0);
+      const itemDescription =
+        items.length > 0
+          ? items
+              .slice(0, 3)
+              .map((it) => `${it.product}${it.size ? `(${it.size})` : ""}x${it.quantity}`)
+              .join(", ")
+          : String(structured.product ?? "Order");
+
+      const { createSteadfastOrder } = await import("../integrations/steadfast/steadfastService.js");
+      const delivery = await createSteadfastOrder(
+        { apiKey: steadfastCfg!.apiKey, secretKey: steadfastCfg!.secretKey },
+        {
+          merchantOrderId: order.id,
+          recipientName,
+          recipientPhone,
+          recipientAddress,
+          itemDescription,
+          cashAmount,
+        },
+      );
+      await prisma.order.update({
+        where: { id: order.id },
+        data: {
+          // Reuse pathaoConsignmentId / pathaoMerchantOrderId as the universal
+          // courier consignment + tracking columns. Naming is historical.
+          pathaoConsignmentId: delivery.consignmentId,
+          pathaoMerchantOrderId: delivery.trackingCode || null,
+          status: "DELIVERY_SCHEDULED",
+          deliveryStatus: "BOOKED",
+        },
+      });
+      logger.info(
+        { orderId: order.id, consignmentId: delivery.consignmentId, trackingCode: delivery.trackingCode },
+        "Steadfast booking succeeded",
+      );
+    } catch (e) {
+      logger.error({ e, orderId: order.id }, "Steadfast booking failed");
+      await prisma.order.update({
+        where: { id: order.id },
+        data: { failureReason: `steadfast:${String(e)}` },
+      });
+    }
+  } else if (courierProvider !== "none" && !shouldAutoBook) {
     await prisma.order.update({
       where: { id: order.id },
       data: { status: "COMPLETED", deliveryStatus: "PENDING" },

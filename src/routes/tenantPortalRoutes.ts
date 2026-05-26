@@ -7,6 +7,7 @@ import multer from "multer";
 import { requireTenantApiKey } from "../middlewares/tenantApiAuth.js";
 import {
   bookPathao,
+  bookSteadfast,
   bulkDeleteProductMappings,
   cancelOrder,
   deleteProductMapping,
@@ -29,12 +30,22 @@ import {
   updateScheduledPost,
   deleteScheduledPost,
   publishScheduledPostNow,
+  approveScheduledPost,
+  rejectScheduledPost,
   generatePostCaption,
+  getContentAgentSettings,
+  updateContentAgentSettings,
+  runContentAgentNow,
+  getGraceStatus,
+  endGraceEarly,
+  listMutedConversations,
+  unmuteConversation,
+  validateFacebookPage,
   validateInstagram,
   validateTiktok,
 } from "../controllers/tenantPortalController.js";
 import { learnPersonaFromUploads } from "../controllers/personaLearnController.js";
-import { testPathao, testSslcommerz, testTelegram } from "../controllers/integrationTestController.js";
+import { testPathao, testSslcommerz, testTelegram, testSteadfast } from "../controllers/integrationTestController.js";
 import {
   deleteTrainingJsonCorpus,
   getTrainingJsonCorpus,
@@ -87,6 +98,7 @@ tenantPortalRoutes.get("/orders/:orderId", getOrder);
 tenantPortalRoutes.get("/orders/:orderId/invoice", getOrderInvoice);
 tenantPortalRoutes.post("/orders/:orderId/mark-paid", markOrderPaidManually);
 tenantPortalRoutes.post("/orders/:orderId/book-pathao", bookPathao);
+tenantPortalRoutes.post("/orders/:orderId/book-steadfast", bookSteadfast);
 tenantPortalRoutes.post("/orders/:orderId/cancel", cancelOrder);
 tenantPortalRoutes.patch("/settings", patchTenantSettings);
 tenantPortalRoutes.post("/chat/simulate", simulateChat);
@@ -94,6 +106,7 @@ tenantPortalRoutes.post("/settings/business-logo", logoUpload.single("logo"), up
 tenantPortalRoutes.post("/settings/invoice-preview", previewInvoice);
 tenantPortalRoutes.post("/integrations/sslcommerz/test", testSslcommerz);
 tenantPortalRoutes.post("/integrations/pathao/test", testPathao);
+tenantPortalRoutes.post("/integrations/steadfast/test", testSteadfast);
 tenantPortalRoutes.post("/integrations/telegram/test", testTelegram);
 tenantPortalRoutes.post(
   "/persona/learn",
@@ -123,9 +136,23 @@ tenantPortalRoutes.post("/scheduled-posts", createScheduledPost);
 tenantPortalRoutes.patch("/scheduled-posts/:id", updateScheduledPost);
 tenantPortalRoutes.delete("/scheduled-posts/:id", deleteScheduledPost);
 tenantPortalRoutes.post("/scheduled-posts/:id/publish-now", publishScheduledPostNow);
+tenantPortalRoutes.post("/scheduled-posts/:id/approve", approveScheduledPost);
+tenantPortalRoutes.post("/scheduled-posts/:id/reject", rejectScheduledPost);
 tenantPortalRoutes.post("/generate-caption", generatePostCaption);
 
+// Content agent (autonomous post drafter)
+tenantPortalRoutes.get("/content-agent", getContentAgentSettings);
+tenantPortalRoutes.patch("/content-agent", updateContentAgentSettings);
+tenantPortalRoutes.post("/content-agent/run-now", runContentAgentNow);
+
+// Grace-window + per-conversation agent mute control
+tenantPortalRoutes.get("/grace-status", getGraceStatus);
+tenantPortalRoutes.post("/grace-status/end", endGraceEarly);
+tenantPortalRoutes.get("/conversations/muted", listMutedConversations);
+tenantPortalRoutes.post("/conversations/:conversationId/unmute", unmuteConversation);
+
 // Social account validation
+tenantPortalRoutes.get("/social/facebook-status", validateFacebookPage);
 tenantPortalRoutes.post("/social/validate-instagram", validateInstagram);
 tenantPortalRoutes.post("/social/validate-tiktok", validateTiktok);
 

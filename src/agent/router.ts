@@ -3,7 +3,13 @@ import { z } from "zod";
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { parseJsonObjectFromLlmContent } from "../llm/ollamaService.js";
-import { AGENT_OUTPUT_SCHEMA_HINT, AGENT_SYSTEM_PROMPT } from "./prompts.js";
+import { prisma } from "../db/prisma.js";
+import { parseTenantSettings } from "../types/tenant-settings.js";
+import {
+  AGENT_OUTPUT_SCHEMA_HINT,
+  buildAgentSystemPrompt,
+  resolvePersonaIdentity,
+} from "./prompts.js";
 import type {
   AgentSnapshot,
   AgentStepLog,
@@ -223,13 +229,25 @@ export async function askRouter(args: {
 
   const t0 = Date.now();
   let raw = "";
+  // Resolve the persona for this tenant — defaults to "Karim, Moderator of this Page".
+  // Cheap: one indexed Prisma read per LLM call. Robust to lookup failure
+  // (we just fall back to the default identity).
+  const tenant = await prisma.tenant
+    .findUnique({
+      where: { id: args.input.tenantId },
+      select: { settings: true },
+    })
+    .catch(() => null);
+  const persona = parseTenantSettings(tenant?.settings).botPersona;
+  const identity = resolvePersonaIdentity(persona);
+  const systemPrompt = buildAgentSystemPrompt(identity);
   try {
     const res = await axios.post(
       `${config.ollamaBaseUrl.replace(/\/$/, "")}/api/chat`,
       {
         model: config.ollamaModel,
         messages: [
-          { role: "system", content: AGENT_SYSTEM_PROMPT },
+          { role: "system", content: systemPrompt },
           { role: "user", content: userBlock },
         ],
         stream: false,

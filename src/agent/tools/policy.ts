@@ -51,7 +51,7 @@ export const policyTools: ToolDef[] = [
   {
     name: "get_shop_policies",
     description:
-      "Read shop-wide policies and pricing rails the AI must NOT invent: delivery charge, advance payment amount, manual payment numbers (bKash/Nagad), SSLCommerz availability, return policy if the shop set one in settings. Call whenever the customer asks about delivery cost, advance, payment options, address-related charges, or 'kosto'/'koto'.",
+      "Read shop-wide policies and pricing rails the AI must NOT invent: delivery charge, delivery time (normal vs customised), advance payment amount, manual payment numbers (bKash/Nagad), SSLCommerz availability, return policy if the shop set one in settings. Call whenever the customer asks about delivery cost, delivery time / 'kobe pabo' / 'koto din lagbe', advance, payment options, address-related charges, or 'kosto'/'koto'.",
     paramsSchema: PolicyArgs,
     paramsHint: "{}",
     examples: [
@@ -100,6 +100,24 @@ export const policyTools: ToolDef[] = [
       } else {
         lines.push("manual_payment=disabled");
       }
+      // Delivery time presets. Format both ranges as "X-Y din" or "X din"
+      // so the LLM can quote them verbatim. The customer-facing decision
+      // (normal vs customised) is made elsewhere — here we just expose both.
+      const dt = s.deliveryTimes;
+      const fmtRange = (r: { minDays?: number; maxDays?: number } | undefined): string | null => {
+        if (!r) return null;
+        const min = r.minDays;
+        const max = r.maxDays;
+        if (min == null && max == null) return null;
+        if (min != null && max != null && min !== max) return `${min}-${max} din`;
+        const v = min ?? max;
+        return v != null ? `${v} din` : null;
+      };
+      const normalRange = fmtRange(dt?.normal);
+      const customisedRange = fmtRange(dt?.customised);
+      if (normalRange) lines.push(`delivery_time_normal=${normalRange}`);
+      if (customisedRange) lines.push(`delivery_time_customised=${customisedRange}`);
+      if (!normalRange && !customisedRange) lines.push("delivery_time=not_set");
       if (s.businessProfile?.invoiceFooter?.trim()) {
         lines.push(`invoice_footer=${s.businessProfile.invoiceFooter.trim().slice(0, 200)}`);
       }
@@ -112,6 +130,7 @@ export const policyTools: ToolDef[] = [
           legacyAdvancePaymentBdt: s.advancePaymentBdt ?? null,
           sslcommerzAvailable: ssl,
           manualPayment: m ?? null,
+          deliveryTimes: dt ?? null,
         },
       };
     },

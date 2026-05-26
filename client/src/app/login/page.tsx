@@ -10,12 +10,22 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+type Tab = "password" | "apiKey";
+
 export default function LoginPage() {
   const { login } = useTenant();
   const router = useRouter();
   const brandLogoUrl = getBrandLogoUrl();
   const brandNameUrl = getBrandNameUrl();
+  const [tab, setTab] = useState<Tab>("password");
+
+  // Password tab state
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  // Api-key tab state
   const [apiKey, setApiKey] = useState("");
+
   const [err, setErr] = useState("");
   const [pending, setPending] = useState(false);
 
@@ -24,7 +34,21 @@ export default function LoginPage() {
     setErr("");
     setPending(true);
     try {
-      await login(apiKey.trim());
+      if (tab === "password") {
+        if (!email.trim() || !password) {
+          setErr("Email and password are required.");
+          setPending(false);
+          return;
+        }
+        await login({ mode: "password", email: email.trim(), password });
+      } else {
+        if (!apiKey.trim()) {
+          setErr("API key is required.");
+          setPending(false);
+          return;
+        }
+        await login({ mode: "apiKey", apiKey: apiKey.trim() });
+      }
       router.replace("/portal");
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : "Sign-in failed");
@@ -47,30 +71,87 @@ export default function LoginPage() {
               <img src={brandLogoUrl} alt="Brand logo" className="h-12 w-12 rounded-xl object-contain sm:h-14 sm:w-14 brightness-0 invert" />
               <img src={brandNameUrl} alt="Brand name" className="h-6 w-auto max-w-[10rem] object-contain sm:h-7 sm:max-w-[11rem] brightness-0 invert" />
             </div>
-            <h1 className="font-display text-display-sm font-bold text-balance text-white">Client workspace</h1>
+            <h1 className="font-display text-display-sm font-bold text-balance text-white">Sign in</h1>
             <p className="mt-3 text-sm font-medium leading-relaxed text-slate-500">
-              Use the <span className="text-slate-300">tenant API key</span> your operator issued —
-              it starts with <code className="text-indigo-300">sk_live_</code> (not “sk_liver”). It is
-              saved in this browser until you sign out. Keep the{" "}
-              <strong className="text-slate-400">backend API running</strong> on port 4000 (
-              <code className="text-slate-600">npm run dev</code> in the main project folder).
+              Use the email + password you set during activation. Forgot your
+              password? Ask the platform admin to issue a new activation link.
             </p>
           </div>
+
+          {/* Tabs */}
+          <div className="mb-5 flex gap-1 rounded-xl border border-white/[0.07] bg-white/[0.02] p-1">
+            <button
+              type="button"
+              onClick={() => setTab("password")}
+              className={`flex-1 rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                tab === "password" ? "bg-white/10 text-white" : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              Email & password
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab("apiKey")}
+              className={`flex-1 rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                tab === "apiKey" ? "bg-white/10 text-white" : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              API key (developer)
+            </button>
+          </div>
+
           <form onSubmit={onSubmit} className="space-y-4">
-            <div>
-              <label className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-slate-500">
-                API key
-              </label>
-              <textarea
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                rows={3}
-                placeholder="sk_live_…"
-                className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 font-mono text-sm text-slate-100 placeholder:text-slate-600 focus:border-accent/50 focus:outline-none focus:ring-1 focus:ring-accent/40"
-                autoComplete="off"
-                required
-              />
-            </div>
+            {tab === "password" ? (
+              <>
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-slate-500">
+                    Email
+                  </label>
+                  <input
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    type="email"
+                    autoComplete="email"
+                    placeholder="you@yourshop.com"
+                    className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 focus:border-accent/50 focus:outline-none focus:ring-1 focus:ring-accent/40"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-slate-500">
+                    Password
+                  </label>
+                  <input
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    type="password"
+                    autoComplete="current-password"
+                    placeholder="••••••••"
+                    className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-600 focus:border-accent/50 focus:outline-none focus:ring-1 focus:ring-accent/40"
+                    required
+                  />
+                </div>
+              </>
+            ) : (
+              <div>
+                <label className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-slate-500">
+                  API key
+                </label>
+                <textarea
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  rows={3}
+                  placeholder="sk_live_…"
+                  className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 font-mono text-sm text-slate-100 placeholder:text-slate-600 focus:border-accent/50 focus:outline-none focus:ring-1 focus:ring-accent/40"
+                  autoComplete="off"
+                  required
+                />
+                <p className="mt-2 text-[11px] leading-relaxed text-slate-600">
+                  Only use this if you also use the API key for webhooks. For dashboard access, prefer Email & password.
+                </p>
+              </div>
+            )}
+
             {err && (
               <p className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
                 {err}

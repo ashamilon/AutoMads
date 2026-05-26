@@ -26,6 +26,8 @@ type Replacement = {
   pattern: RegExp;
   /** Replacement that preserves the original capitalisation pattern (lower / Title / UPPER). */
   replace: (match: string) => string;
+  /** What override kind to log when this rule fires. Defaults to banned_word. */
+  kind?: "banned_word" | "tone_rewrite";
 };
 
 function preserveCase(replacement: string, original: string): string {
@@ -63,6 +65,61 @@ const REPLACEMENTS: Replacement[] = [
     pattern: /\bselect\b/gi,
     replace: (m) => preserveCase("choose koren", m),
   },
+
+  // ─── Tone — soften robotic "X holo / dewa holo" stems ──────────────────────
+  // The model sometimes lands on Bangla-news passive stems that read like a
+  // status banner ("niche dewa holo …", "send kora holo …"). Rewrite to warm
+  // active Banglish so the agent sounds like a shopkeeper, not a notification.
+  //
+  // Order matters: longer / more specific phrases first so they win over
+  // bare "X holo".
+  {
+    // "niche dewa holo" / "uporer dewa holo" / "nicher list e dewa holo" / "ekhane dewa holo"
+    pattern: /\b(niche|nicher list e|nicher liste|uporer|ekhane|nicher)\s+dewa\s+holo\b/gi,
+    replace: () => "ei je dekhe nin",
+    kind: "tone_rewrite",
+  },
+  {
+    // bare "dewa holo" / "deya holo"
+    pattern: /\bde[wy]a\s+holo\b/gi,
+    replace: () => "ei je",
+    kind: "tone_rewrite",
+  },
+  {
+    // "pathano holo" / "pathano holo apnar jonno"
+    pattern: /\bpathano\s+holo\b/gi,
+    replace: () => "pathiye dilam",
+    kind: "tone_rewrite",
+  },
+  {
+    // "send kora holo" / "send hoye gechhe" used as a status banner
+    pattern: /\bsend\s+kora\s+holo\b/gi,
+    replace: () => "pathiye dilam",
+    kind: "tone_rewrite",
+  },
+  {
+    // "kora holo" / "kore dewa holo" — generic "it has been done"
+    pattern: /\bkore?\s+de[wy]a\s+holo\b/gi,
+    replace: () => "kore dilam",
+    kind: "tone_rewrite",
+  },
+  {
+    pattern: /\bkora\s+holo\b/gi,
+    replace: () => "kore dilam",
+    kind: "tone_rewrite",
+  },
+  {
+    // "add kora holo" / "added kora holo"
+    pattern: /\b(add|added)\s+kora\s+holo\b/gi,
+    replace: () => "add kore dilam",
+    kind: "tone_rewrite",
+  },
+  {
+    // "confirm kora holo"
+    pattern: /\bconfirm\s+kora\s+holo\b/gi,
+    replace: () => "confirm kore dilam",
+    kind: "tone_rewrite",
+  },
 ];
 
 export function sanitizeCustomerReply(text: string): string {
@@ -71,8 +128,61 @@ export function sanitizeCustomerReply(text: string): string {
   for (const { pattern, replace } of REPLACEMENTS) {
     out = out.replace(pattern, replace);
   }
+  // Capability-confession rewrite. The customer must NEVER be told the agent
+  // can't see / read / remember things — that breaks trust on day-1 of a fresh
+  // page integration where there genuinely is no history yet. We rewrite to a
+  // warm active prompt instead. Whole-sentence replace, conservative match.
+  out = rewriteCapabilityConfessions(out);
   // Tidy up any double spaces the substitutions might create.
   return out.replace(/[ \t]{2,}/g, " ").replace(/ +([,.!?])/g, "$1");
+}
+
+/**
+ * Detect Banglish/English self-confessions that say "I can't see / read /
+ * remember / find your previous messages or orders" and rewrite the offending
+ * sentence with a warm pivot. The rewrite is conservative: only the sentence
+ * containing the confession is replaced, not the whole reply, so other useful
+ * content the model produced is preserved.
+ *
+ * The rewrite intentionally invites the customer to share what they need so
+ * the agent can call the right lookup tool on the next turn.
+ */
+const CAPABILITY_CONFESSION_PATTERNS: ReadonlyArray<RegExp> = [
+  // "uporer message dekhte parchi na" — most common Banglish form
+  /(uporer|upor er|uper)\s+(message|msg|chat|conversation)[^.!?]*?(dekh|dekhte|dekhchi|paacchi|paachhi|parchi)\s*(na|nai|paarchi\s*na)/i,
+  // "previous chat / message ami dekhte parchi na"
+  /(previous|age er|aag er|purono)\s+(message|msg|chat|conversation|order|kotha)[^.!?]*?(dekhte|jante|find|khuje)\s*(parchi|pacchi|paachhi)\s*(na|nai)/i,
+  // "ami apnar age er order khuje pacchi na"
+  /\bami\b[^.!?]*?(age er|aag er|purono|previous)\s+(order|message|conversation|kotha)[^.!?]*?(khuj|find|dekh|jante)[^.!?]*?(pa(c|ch)?hi|parchi|paachhi)\s*(na|nai)/i,
+  // "ami remember korte parchi na" / "mone korte parchi na"
+  /\b(remember|mone)\b[^.!?]*?(korte|kor[a-z]*)\s*(parchi|pacchi|paachhi)\s*(na|nai)/i,
+  // English-side: "I can't see your previous / earlier messages / order history"
+  /\bi\s+(can(?:not|'t|t)|am\s+(?:un|not\s+)able)\s+(?:to\s+)?(see|view|read|access|find|recall|remember)[^.!?]*?(previous|earlier|prior|past|message|chat|conversation|order|history)/i,
+  // "ami new, kichu jani na" / "ami notun, kichu jani na" — system-fresh confession
+  /\bami\b[^.!?]*?\b(new|notun|fresh)\b[^.!?]*?(jani|janina|janchi)\s*na/i,
+];
+
+/** Warm, generic pivot. Customer-facing, Banglish, never blames the system. */
+const CAPABILITY_PIVOT = "Apni ektu bolen ki niye janche — ami ekhuni dekhe dichchi 🙂";
+
+function rewriteCapabilityConfessions(text: string): string {
+  if (!text) return text;
+  // Split on sentence-ish boundaries so we only replace the bad sentence, not
+  // the whole reply. Keeps surrounding helpful content intact.
+  // We split keeping the trailing punctuation attached to the previous chunk.
+  const parts = text.split(/(?<=[.!?])\s+/);
+  let pivotInjected = false;
+  const rewritten = parts.map((sentence) => {
+    if (CAPABILITY_CONFESSION_PATTERNS.some((re) => re.test(sentence))) {
+      if (pivotInjected) return ""; // collapse multiple confessions into one pivot
+      pivotInjected = true;
+      // Preserve sentence-trailing punctuation when present so the rewritten
+      // sentence still reads naturally inside the wider reply.
+      return CAPABILITY_PIVOT;
+    }
+    return sentence;
+  });
+  return rewritten.filter((s) => s.length > 0).join(" ");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -84,6 +194,8 @@ export function sanitizeCustomerReply(text: string): string {
 /** A single modification made by `filterReply`. One row per replacement / block. */
 export type FilterOverride =
   | { kind: "banned_word"; from: string; to: string }
+  | { kind: "tone_rewrite"; from: string; to: string }
+  | { kind: "capability_confession"; phrase: string }
   | { kind: "anti_hallucination"; attribute: string; value: string }
   | { kind: "confirmation_block"; phrase: string };
 
@@ -168,12 +280,27 @@ function buildToolHaystack(results: ReadonlyArray<VerifiedToolResult>): string {
  */
 function applyBannedWordPass(text: string): FilterReplyResult {
   const overrides: FilterOverride[] = [];
-  for (const { pattern, replace } of REPLACEMENTS) {
+  for (const { pattern, replace, kind } of REPLACEMENTS) {
     // `.match` with the /g flag yields every occurrence as a plain string, in order.
     const matches = text.match(pattern);
     if (!matches) continue;
     for (const m of matches) {
-      overrides.push({ kind: "banned_word", from: m, to: replace(m) });
+      const k = kind ?? "banned_word";
+      const to = replace(m);
+      if (k === "tone_rewrite") {
+        overrides.push({ kind: "tone_rewrite", from: m, to });
+      } else {
+        overrides.push({ kind: "banned_word", from: m, to });
+      }
+    }
+  }
+  // Capability-confession detection. `sanitizeCustomerReply` already performs
+  // the textual rewrite; we walk the input here purely to emit one audit row
+  // per offending sentence so admins can see how often the model leaks these.
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  for (const s of sentences) {
+    if (CAPABILITY_CONFESSION_PATTERNS.some((re) => re.test(s))) {
+      overrides.push({ kind: "capability_confession", phrase: s.trim() });
     }
   }
   return { text: sanitizeCustomerReply(text), overrides };
