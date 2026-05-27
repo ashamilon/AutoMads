@@ -40,10 +40,61 @@ export const photoTools: ToolDef[] = [
           observation: `No images recorded in catalog for sku=${args.sku}. Tell the customer that and ask if they want details instead.`,
         };
       }
+
+      // Idempotency guard: refuse to re-send photos for a sku we already
+      // sent in the LAST 6 MINUTES of this conversation. Without this the
+      // model can request photos in turn N, the customer thanks, and the
+      // model interprets "thanks" as a fresh photo request and sends them
+      // again. Cap the lookback to a short window so a customer who really
+      // wants a fresh look (e.g. an hour later) still gets one. The cap
+      // also bounds the query.
+      const since = new Date(Date.now() - 6 * 60 * 1000);
+      const recentSends = await prisma.messengerMessage
+        .findMany({
+          where: {
+            conversationId: ctx.input.conversationId,
+            role: "assistant",
+            createdAt: { gte: since },
+            // Looking for our own "[sent product photo]" markers.
+            text: "[sent product photo]",
+          },
+          select: { imageUrls: true, createdAt: true },
+          orderBy: { createdAt: "desc" },
+          take: 30,
+        })
+        .catch(() => []);
+      const alreadySentUrls = new Set<string>();
+      for (const r of recentSends) {
+        for (const u of r.imageUrls ?? []) alreadySentUrls.add(u);
+      }
+      const skuUrlSet = new Set(assets.imageUrls);
+      const overlap = [...alreadySentUrls].filter((u) => skuUrlSet.has(u));
+      if (overlap.length >= Math.min(args.max, assets.imageUrls.length)) {
+        // We've already sent at least as many of this SKU's photos as the
+        // current request asks for, within the last 6 minutes. Don't spam.
+        logger.info(
+          { sku: args.sku, alreadySent: overlap.length, requested: args.max },
+          "send_product_photos: idempotency skip — photos already sent recently",
+        );
+        return {
+          ok: false,
+          error: "already_sent_recently",
+          observation:
+            `Photos for sku=${args.sku} were already sent to this customer in the last few minutes ` +
+            `(${overlap.length} image(s)). Do NOT send them again — instead call \`reply\` to ` +
+            `progress the conversation: ask for size + qty, or for which specific photo they want a ` +
+            `closer look at, or what else they'd like to know.`,
+        };
+      }
+
       const toSend = assets.imageUrls.slice(0, args.max);
       let sent = 0;
       const failures: string[] = [];
       for (const url of toSend) {
+        // Per-URL dedup: skip individual URLs that were just sent so a
+        // partial overlap (e.g. asked for 5, sent 3 last turn) only
+        // dispatches the missing 2.
+        if (alreadySentUrls.has(url)) continue;
         try {
           await sendMessengerImage({
             pageAccessToken: ctx.input.pageAccessToken,

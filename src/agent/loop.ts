@@ -1408,6 +1408,48 @@ async function generateResponse(state: LoopState): Promise<Partial<LoopState>> {
       args: ctx.effectiveArgs,
       reason: `same_tool_args_count=${sameToolArgsCount}`,
     });
+
+    // HARD BLOCK: refuse to actually run the tool again. Earlier this guard
+    // only LOGGED — the tool kept executing and side-effecting (e.g. the
+    // model called `send_product_photos {sku, max:5}` 15 times in one turn,
+    // sending the same Cloudinary photo to Messenger 15 times). We now
+    // synthesise an `ok:false` result with a strong "stop calling this"
+    // signal in the observation, so the next router iteration sees a
+    // failed tool and pivots to a different action (typically `reply`).
+    const blockedResult = {
+      ok: false,
+      error: "anti_loop_blocked",
+      observation:
+        `Refusing to call ${toolName} a third time with the same args this turn. ` +
+        `Already executed ${sameToolArgsCount} time(s). The customer has ALREADY received this output; ` +
+        `do NOT call this tool again — instead call \`reply\` with a short next-step prompt ` +
+        `(e.g. ask for size + qty, or ask which item they want from the list).`,
+    } as const;
+    ctx.lastToolResult = blockedResult;
+    ctx.lastToolLatencyMs = 0;
+
+    logToolCall({
+      ctx: makeLogCtx(state, iter),
+      tool: toolName,
+      args: ctx.effectiveArgs,
+      ok: false,
+      latencyMs: 0,
+      errorCode: "anti_loop_blocked",
+    });
+
+    const blockedStep = makeStepLog({
+      iter,
+      step: "generate_response",
+      tool: toolName,
+      argsPayload: ctx.effectiveArgs,
+      ok: false,
+      observation: blockedResult.observation,
+      toolLatencyMs: 0,
+      fsmState: ctx.workingSnapshot.order_state,
+      confidenceLevel: ctx.composite,
+      confidenceScores: ctx.confidenceScores,
+    });
+    return { steps: [...state.steps, blockedStep] };
   }
 
   // Run the handler. Persistence inside `ctx.saveSnapshot` updates our working
