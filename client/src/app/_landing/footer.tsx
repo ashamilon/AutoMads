@@ -15,6 +15,7 @@ import { Github, Mail, Twitter } from "lucide-react";
 import Link from "next/link";
 import { getBrandLogoUrl, getBrandNameUrl } from "@/lib/branding";
 import { WHATSAPP_NUMBER_DISPLAY, buildWhatsAppUrl } from "@/lib/contact";
+import { WhatsAppGlyph } from "@/components/ui/whatsapp-cta";
 
 export function LandingFooter() {
   const brandLogoUrl = getBrandLogoUrl();
@@ -76,9 +77,7 @@ export function LandingFooter() {
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-2 transition hover:text-white"
                 >
-                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 text-[#25D366]" fill="currentColor" aria-hidden="true">
-                    <path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 2.1.55 4.05 1.6 5.78L2 22l4.41-1.71a9.86 9.86 0 0 0 5.62 1.62h.01c5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.84 9.84 0 0 0 12.04 2zm0 1.66a8.25 8.25 0 0 1 5.85 2.42 8.22 8.22 0 0 1 2.42 5.83c0 4.55-3.71 8.26-8.27 8.26h-.01a8.27 8.27 0 0 1-4.21-1.16l-.3-.18-3.13 1.21 1.23-3.05-.2-.31a8.21 8.21 0 0 1-1.27-4.39c0-4.55 3.71-8.25 8.26-8.25 0-.01.01-.01.02-.01zm-2.4 4.45c-.18 0-.46.07-.7.34-.24.27-.93.91-.93 2.22s.95 2.58 1.08 2.76c.13.18 1.84 2.92 4.55 4 .64.27 1.13.43 1.52.55.64.21 1.22.18 1.68.11.51-.08 1.57-.64 1.79-1.27.22-.62.22-1.16.16-1.27-.07-.11-.24-.18-.51-.31-.27-.13-1.57-.78-1.81-.86-.24-.09-.42-.13-.6.14-.18.27-.69.86-.85 1.04-.16.18-.31.2-.58.07-.27-.13-1.13-.42-2.16-1.33-.8-.71-1.34-1.6-1.49-1.86-.16-.27-.02-.42.12-.55.12-.12.27-.31.4-.47.13-.16.18-.27.27-.45.09-.18.04-.34-.02-.47-.07-.13-.6-1.45-.83-1.99-.22-.51-.45-.45-.6-.45-.16 0-.34-.02-.51-.02z" />
-                  </svg>
+                  <WhatsAppGlyph className="h-3.5 w-3.5 text-[#25D366]" />
                   WhatsApp · <span className="font-mono text-[11.5px] text-slate-400">{WHATSAPP_NUMBER_DISPLAY}</span>
                 </a>
               </li>
