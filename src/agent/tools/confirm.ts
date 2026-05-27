@@ -44,6 +44,33 @@ function buildTranId(orderId: string): string {
   return `TXN_${orderId.slice(0, 12)}_${Date.now()}`;
 }
 
+/**
+ * Did the customer / agent flag this conversation as "pay full amount in
+ * advance"? Used for gift orders and trusted repeat customers who want to
+ * skip the partial-advance + COD-balance dance and settle the whole bill
+ * up-front. The flag lives on `snapshot.confirmed_information.order.payment_full`
+ * (boolean) and is set by the LLM via `save_session_state` whenever the
+ * customer says any of:
+ *   • "full payment dibo" / "puro taka ekhoni dibo"
+ *   • "gift kintu" / "amar bondhu er jonno gift"
+ *   • "no COD, full advance" / "advance e shob"
+ *
+ * When true, `confirm_order` charges (productSubtotal + deliveryCharge)
+ * up-front instead of the configured advance amount, and the payment-block
+ * reply reads "Full Payment" rather than "Advance Payment".
+ */
+function isFullPaymentRequested(snapshot: { confirmed_information?: Record<string, Record<string, unknown>> | undefined }): boolean {
+  const order = snapshot.confirmed_information?.order;
+  if (!order || typeof order !== "object" || Array.isArray(order)) return false;
+  const v = (order as Record<string, unknown>)["payment_full"];
+  if (typeof v === "boolean") return v;
+  if (typeof v === "string") {
+    const t = v.trim().toLowerCase();
+    return t === "true" || t === "1" || t === "yes" || t === "full";
+  }
+  return false;
+}
+
 
 type Verified = {
   sku: string;
@@ -149,6 +176,10 @@ function buildPaymentBlock(args: {
   gatewayUrl: string | null;
   payableNowBdt: number;
   advanceBreakdown?: Array<{ kind: "fixed" | "plain" | "customised"; qty: number; unitBdt: number; subtotalBdt: number }>;
+  /** When true, the customer paid the FULL amount up-front. Surfaces a
+   * "Full Payment" header instead of "Advance Payment" so the receipt is
+   * unambiguous (and so the courier knows there's no COD to collect). */
+  fullPayment?: boolean;
   deliveryChargeBdt?: number;
   manual: ReturnType<typeof parseTenantSettings>["manualPayment"];
 }): string {
@@ -156,12 +187,13 @@ function buildPaymentBlock(args: {
   sections.push(`🆔 Order ID:\n${args.tranId ?? args.orderId.slice(0, 12)}`);
   const charges: string[] = [];
   const breakdown = args.advanceBreakdown ?? [];
+  const paymentLabel = args.fullPayment ? "Full Payment" : "Advance Payment";
   if (breakdown.length === 0 && args.payableNowBdt > 0) {
-    charges.push(`💵 Advance Payment: ${args.payableNowBdt} BDT`);
+    charges.push(`💵 ${paymentLabel}: ${args.payableNowBdt} BDT`);
   } else if (breakdown.length === 1 && breakdown[0]!.kind === "fixed") {
-    charges.push(`💵 Advance Payment: ${breakdown[0]!.subtotalBdt} BDT`);
+    charges.push(`💵 ${paymentLabel}: ${breakdown[0]!.subtotalBdt} BDT`);
   } else if (breakdown.length > 0) {
-    charges.push(`💵 Advance Payment: ${args.payableNowBdt} BDT`);
+    charges.push(`💵 ${paymentLabel}: ${args.payableNowBdt} BDT`);
     for (const b of breakdown) {
       const label =
         b.kind === "plain"
@@ -172,8 +204,14 @@ function buildPaymentBlock(args: {
       charges.push(`  • ${label}: ${b.unitBdt} × ${b.qty} = ${b.subtotalBdt} BDT`);
     }
   }
-  if (typeof args.deliveryChargeBdt === "number") {
+  if (typeof args.deliveryChargeBdt === "number" && !args.fullPayment) {
+    // Skip the delivery line in full-payment mode — the headline `Full
+    // Payment` already includes it, so showing it again would double-count
+    // visually for the customer.
     charges.push(`🚚 Delivery Charge: ${args.deliveryChargeBdt} BDT`);
+  }
+  if (args.fullPayment) {
+    charges.push("✨ COD due on delivery: 0 BDT");
   }
   if (charges.length) sections.push(charges.join("\n"));
   if (args.gatewayUrl) sections.push(`🔗 Payment Link:\n${args.gatewayUrl}`);
@@ -350,8 +388,41 @@ export const confirmTools: ToolDef[] = [
           addOns: v.addOns,
         })),
       });
-      // When no policy at all is set, payable_now defaults to the full subtotal — same as before.
-      const payableNowBdt = advance.totalBdt > 0 ? advance.totalBdt : productSubtotalBdt;
+
+      // Full-payment override (gift orders, trusted customers): when the
+      // conversation snapshot has `confirmed_information.order.payment_full = true`,
+      // we charge `productSubtotal + deliveryCharge` upfront instead of the
+      // configured advance. The advance breakdown is replaced with a single
+      // "full payment" line so the receipt reads cleanly. When false (the
+      // common case) behaviour is unchanged — partial advance per policy.
+      const wantsFullPayment = isFullPaymentRequested(ctx.snapshot);
+      const deliveryChargeBdt =
+        typeof settings.deliveryChargeBdt === "number" ? settings.deliveryChargeBdt : 0;
+      const fullPayableBdt = productSubtotalBdt + deliveryChargeBdt;
+
+      const payableNowBdt = wantsFullPayment
+        ? fullPayableBdt
+        : advance.totalBdt > 0
+          ? advance.totalBdt
+          : productSubtotalBdt;
+      // The breakdown surfaces in the payment block UI. For full-payment we
+      // synthesise a single fixed-kind line so the existing builder renders
+      // a clean total without the per-product drilldown.
+      const effectiveBreakdown = wantsFullPayment
+        ? [
+            {
+              kind: "fixed" as const,
+              qty: 1,
+              unitBdt: fullPayableBdt,
+              subtotalBdt: fullPayableBdt,
+            },
+          ]
+        : advance.breakdown;
+      const effectivePolicyDescription = wantsFullPayment
+        ? `full_payment: ${fullPayableBdt} BDT (subtotal ${productSubtotalBdt}` +
+          (deliveryChargeBdt > 0 ? ` + delivery ${deliveryChargeBdt}` : "") +
+          `)`
+        : advance.policyDescription;
 
       // Persist customer info to long-term profile.
       await setProfileFields(ctx.input.tenantId, ctx.input.psid, {
@@ -376,9 +447,13 @@ export const confirmTools: ToolDef[] = [
           addOns: v.addOns,
         })),
         advance: {
-          policy: advance.policyDescription,
-          breakdown: advance.breakdown,
-          totalBdt: advance.totalBdt,
+          policy: effectivePolicyDescription,
+          breakdown: effectiveBreakdown,
+          totalBdt: payableNowBdt,
+          /** When true, customer paid the FULL amount up front (gift order /
+           * trusted-customer flow). Order's COD due is 0; courier shouldn't
+           * try to collect cash on delivery. */
+          fullPayment: wantsFullPayment,
         },
       };
 
@@ -519,7 +594,8 @@ export const confirmTools: ToolDef[] = [
         tranId,
         gatewayUrl,
         payableNowBdt,
-        advanceBreakdown: advance.breakdown,
+        advanceBreakdown: effectiveBreakdown,
+        fullPayment: wantsFullPayment,
         ...(typeof settings.deliveryChargeBdt === "number"
           ? { deliveryChargeBdt: settings.deliveryChargeBdt }
           : {}),
@@ -572,7 +648,7 @@ export const confirmTools: ToolDef[] = [
         ok: true,
         terminal: true,
         reply: replyText,
-        observation: `Order ${order.id.slice(0, 12)} created. Payment link=${gatewayUrl ?? "manual"}, total=${productSubtotalBdt} BDT, payable_now=${payableNowBdt} BDT.`,
+        observation: `Order ${order.id.slice(0, 12)} created. Payment link=${gatewayUrl ?? "manual"}, total=${productSubtotalBdt} BDT, payable_now=${payableNowBdt} BDT${wantsFullPayment ? " (FULL PAYMENT)" : ""}.`,
       };
     },
   },

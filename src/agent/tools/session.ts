@@ -227,6 +227,27 @@ export const sessionTools: ToolDef[] = [
           args: { confirmed_information: { order: { payment_method: "cod" } } },
         },
       },
+      {
+        when:
+          "Customer wants to pay the FULL amount upfront (gift order, trusted customer): " +
+          "'ami full payment dibo' / 'puro taka ekhoni dibo' / 'gift kintu, full advance' / 'no COD, full advance'",
+        call: {
+          tool: "save_session_state",
+          args: {
+            confirmed_information: {
+              order: { payment_method: "sslcommerz", payment_full: true },
+            },
+          },
+        },
+      },
+      {
+        when:
+          "Customer reverts to the normal partial-advance flow after previously choosing full",
+        call: {
+          tool: "save_session_state",
+          args: { confirmed_information: { order: { payment_full: false } } },
+        },
+      },
     ],
     handler: async (rawArgs, ctx) => {
       const conversationId = ctx.input.conversationId;

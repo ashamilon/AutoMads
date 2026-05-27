@@ -568,7 +568,14 @@ export async function bookPathao(req: Request, res: Response): Promise<void> {
   const deliveryCharge = typeof settings.deliveryChargeBdt === "number" ? settings.deliveryChargeBdt : 0;
   const configuredAdvance = typeof settings.advancePaymentBdt === "number" ? settings.advancePaymentBdt : subtotal;
   const payableTotal = subtotal + deliveryCharge;
-  const defaultCod = Math.max(payableTotal - Math.min(configuredAdvance, payableTotal), 0);
+  // Gift / trusted-customer flow: when the order was confirmed in
+  // "full payment" mode, the gateway already collected the entire bill
+  // up-front. The courier MUST collect 0 BDT cash on delivery — otherwise
+  // we'd double-charge the customer.
+  const isFullPaymentOrder = ((structured as { advance?: { fullPayment?: boolean } }).advance?.fullPayment) === true;
+  const defaultCod = isFullPaymentOrder
+    ? 0
+    : Math.max(payableTotal - Math.min(configuredAdvance, payableTotal), 0);
 
   const recipientName = overrides.recipientName?.trim() || (structured.name as string)?.trim() || "Customer";
   const recipientPhone = overrides.recipientPhone?.trim() || (structured.phone as string)?.trim() || "";
@@ -675,7 +682,11 @@ export async function bookSteadfast(req: Request, res: Response): Promise<void> 
   const deliveryCharge = typeof settings.deliveryChargeBdt === "number" ? settings.deliveryChargeBdt : 0;
   const configuredAdvance = typeof settings.advancePaymentBdt === "number" ? settings.advancePaymentBdt : subtotal;
   const payableTotal = subtotal + deliveryCharge;
-  const defaultCod = Math.max(payableTotal - Math.min(configuredAdvance, payableTotal), 0);
+  // Gift / trusted-customer flow — see Pathao branch above for the rationale.
+  const isFullPaymentOrder = ((structured as { advance?: { fullPayment?: boolean } }).advance?.fullPayment) === true;
+  const defaultCod = isFullPaymentOrder
+    ? 0
+    : Math.max(payableTotal - Math.min(configuredAdvance, payableTotal), 0);
 
   const recipientName = overrides.recipientName?.trim() || (structured.name as string)?.trim() || "Customer";
   const recipientPhone = overrides.recipientPhone?.trim() || (structured.phone as string)?.trim() || "";

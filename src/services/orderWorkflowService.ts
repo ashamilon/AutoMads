@@ -5660,6 +5660,16 @@ async function runPostPaymentPipeline(opts: {
   const shouldAutoBook =
     bookingMode === "automatic" || (bookingMode === "smart" && !hasCustomizedItems);
 
+  // When the customer chose "full payment in advance" (gift orders / trusted
+  // repeat customers), the Order's `structuredData.advance.fullPayment` flag
+  // is set true by `confirm_order` and the entire bill (subtotal + delivery)
+  // has already been collected up-front via the gateway. The courier MUST
+  // collect 0 BDT cash on delivery — otherwise the customer would be charged
+  // twice. We compute this once and feed it into both Pathao and Steadfast
+  // branches below.
+  const structuredAdvance = (structured as { advance?: { fullPayment?: boolean } }).advance;
+  const isFullPaymentOrder = structuredAdvance?.fullPayment === true;
+
   if (courierProvider === "pathao" && pathaoCfg && shouldAutoBook) {
     try {
       const subtotal = Number(order.totalAmount?.toString() ?? "0");
@@ -5667,7 +5677,9 @@ async function runPostPaymentPipeline(opts: {
       const configuredAdvance =
         typeof settings.advancePaymentBdt === "number" ? settings.advancePaymentBdt : subtotal;
       const payableTotal = subtotal + deliveryCharge;
-      const amountToCollect = Math.max(payableTotal - Math.min(configuredAdvance, payableTotal), 0);
+      const amountToCollect = isFullPaymentOrder
+        ? 0
+        : Math.max(payableTotal - Math.min(configuredAdvance, payableTotal), 0);
       const recipientName = structured.name?.trim() || "Customer";
       const recipientPhone = structured.phone?.trim() || "";
       const recipientAddress = structured.address?.trim() || "";
@@ -5731,7 +5743,9 @@ async function runPostPaymentPipeline(opts: {
       const configuredAdvance =
         typeof settings.advancePaymentBdt === "number" ? settings.advancePaymentBdt : subtotal;
       const payableTotal = subtotal + deliveryCharge;
-      const cashAmount = Math.max(payableTotal - Math.min(configuredAdvance, payableTotal), 0);
+      const cashAmount = isFullPaymentOrder
+        ? 0
+        : Math.max(payableTotal - Math.min(configuredAdvance, payableTotal), 0);
       const itemDescription =
         items.length > 0
           ? items
