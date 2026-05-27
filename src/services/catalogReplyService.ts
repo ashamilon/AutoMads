@@ -673,8 +673,48 @@ export function extractCatalogAssets(m: ProductMapping): {
   };
 }
 
-/** Pick a small flag/emoji prefix based on team/country in the product name or category. */
-export function pickTeamEmoji(name: string, meta?: Record<string, unknown>): string {
+/**
+ * Pick a small flag/emoji prefix for a product card.
+ *
+ * **Category-gated.** Football/team flags only fire for jersey shops; for
+ * any other business category we return a neutral (or category-themed)
+ * default. Without this gate a shoes shop would prefix product cards with
+ * 🇦🇷 if a SKU happened to contain the word "argentina", a restaurant
+ * would get ⚽ on every menu item, etc.
+ *
+ * Optional `businessCategory` argument — when omitted, the function
+ * preserves the historical jersey behaviour (so the demo tenant and other
+ * jersey shops stay unchanged).
+ */
+export function pickTeamEmoji(
+  name: string,
+  meta?: Record<string, unknown>,
+  businessCategory?: string | null,
+): string {
+  const cat = (businessCategory ?? "").trim().toLowerCase();
+
+  // Non-jersey categories get a neutral / themed prefix that matches the
+  // shop's vertical. The map is intentionally minimal — for verticals not
+  // listed we fall through to no emoji at all rather than serve junk.
+  if (cat && cat !== "jersey") {
+    const themedDefault: Record<string, string> = {
+      shoes: "👟",
+      cosmetics: "💄",
+      restaurant: "🍽️",
+      grocery: "🛒",
+      pharmacy: "💊",
+      electronics: "🔌",
+      jewelry: "💍",
+      furniture: "🛋️",
+      pet: "🐾",
+      pet_shop: "🐾",
+      mobile_accessories: "📱",
+      undergarments: "🩲",
+    };
+    return themedDefault[cat] ?? "";
+  }
+
+  // Jersey path (legacy, unchanged).
   const blob = (
     `${name} ${meta?.["name"] ?? ""} ${meta?.["categoryName"] ?? meta?.["category"] ?? ""} ${meta?.["tags"] ?? ""}`
   ).toLowerCase();
@@ -763,6 +803,14 @@ export type ProductReplyOpts = {
   addOns?: TenantSettings["addOns"];
   /** When true, include "Nite chaile size ar qty bolen." prompt at the end. */
   includeCta?: boolean;
+  /**
+   * Tenant business category — used to category-gate the emoji prefix so
+   * shoe / restaurant / cosmetics shops don't get football flags on their
+   * product cards. Optional for backward-compat with existing call sites
+   * that haven't been threaded yet (those keep the historical jersey
+   * behaviour).
+   */
+  businessCategory?: string | null;
 };
 
 export function buildDeterministicCatalogReply(
@@ -771,9 +819,9 @@ export function buildDeterministicCatalogReply(
 ): string {
   const meta = readMetaObject(m);
   const name = (m.facebookLabel ?? String(meta["name"] ?? "Product")).trim();
-  const flag = pickTeamEmoji(name, meta);
+  const flag = pickTeamEmoji(name, meta, opts.businessCategory ?? null);
   const sections: string[] = [];
-  sections.push(`${flag} ${name}`);
+  sections.push(flag ? `${flag} ${name}` : name);
 
   const facts = resolveProductPricing(meta);
   if (facts.effectivePriceBdt != null) {
@@ -1014,10 +1062,26 @@ export function pickTenantSizeChart(
  *   2. Tenant-level `sizeCharts` library (matched by customer hint + product label)
  *   3. Built-in fabric-aware fallback (player vs fan jersey defaults)
  */
+/**
+ * Build the size chart reply.
+ *
+ * Resolution order:
+ *   1. Per-product `metadata.sizeChart` / `measurements` (CSV-driven, always wins)
+ *   2. Tenant-level `sizeCharts` library (matched by customer hint + product label)
+ *   3. Built-in fabric-aware fallback — JERSEY ONLY. For any other business
+ *      category the fallback returns a polite "we don't have a size chart
+ *      for this product yet" message instead of leaking jersey measurements.
+ *
+ * The `businessCategory` argument MUST be passed for every non-jersey
+ * tenant. When it's `"jersey"` (or omitted, for legacy callers) the
+ * historical player/fan defaults still apply so existing jersey shops keep
+ * working unchanged.
+ */
 export function buildSizeChartReply(
   m: ProductMapping,
   customerHint?: string,
   tenantSizeCharts?: TenantSizeChart[],
+  businessCategory?: string | null,
 ): string {
   const meta = readMetaObject(m);
   const name = (m.facebookLabel ?? String(meta["name"] ?? "Product")).trim();
@@ -1034,6 +1098,22 @@ export function buildSizeChartReply(
     return `${name} — ${tenantPick.label} size chart:\n${lines.join("\n")}\nDelivery time: ${eta}.${tail}`;
   }
 
+  // Jersey-only fallback. The `DEFAULT_PLAYER_VERSION_SIZE_CHART` /
+  // `DEFAULT_FAN_VERSION_SIZE_CHART` constants are football-jersey
+  // measurements; serving them to a shoes / restaurant / cosmetics tenant
+  // would be flat-out wrong. For any non-jersey category we tell the
+  // customer the chart isn't on file yet — this is honest, never
+  // misleading, and prompts the merchant to upload a real chart.
+  const cat = (businessCategory ?? "").trim().toLowerCase();
+  if (cat && cat !== "jersey") {
+    return [
+      `${name} — size chart ekhono add kora nai.`,
+      "Size details janar jonno admin ke ekto wait koraben — sathe sathe set kore deya hobe.",
+      `Delivery time: ${eta}.`,
+    ].join("\n");
+  }
+
+  // Jersey path (legacy, unchanged).
   const variant = detectFabricVariant(m, customerHint);
   if (variant === "player") {
     return `${name} (Player Version) size chart:\n${DEFAULT_PLAYER_VERSION_SIZE_CHART.join("\n")}\nDelivery time: ${eta}.`;
@@ -1058,9 +1138,9 @@ export function buildSizeChartReply(
 export function buildPriceStockReply(m: ProductMapping, opts: ProductReplyOpts = {}): string {
   const meta = readMetaObject(m);
   const name = (m.facebookLabel ?? String(meta["name"] ?? "Product")).trim();
-  const flag = pickTeamEmoji(name, meta);
+  const flag = pickTeamEmoji(name, meta, opts.businessCategory ?? null);
   const facts = resolveProductPricing(meta);
-  const sections: string[] = [`${flag} ${name}`];
+  const sections: string[] = [flag ? `${flag} ${name}` : name];
   if (facts.effectivePriceBdt != null) {
     if (facts.isOnSale && facts.regularPriceBdt != null) {
       const tail = facts.endsAt

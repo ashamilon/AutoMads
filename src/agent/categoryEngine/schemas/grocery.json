@@ -1,0 +1,104 @@
+{
+  "slug": "grocery",
+  "version": 1,
+  "attributes": [
+    {
+      "key": "unit",
+      "label": "Unit",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["piece", "kg", "g", "litre", "ml", "pack"]
+    },
+    {
+      "key": "weight",
+      "label": "Weight",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "g"
+    },
+    {
+      "key": "brand",
+      "label": "Brand",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "category",
+      "label": "Category",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "variantAttributes": [
+    {
+      "key": "weight",
+      "label": "Weight",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "g"
+    }
+  ],
+  "orderAttributes": [
+    {
+      "key": "delivery_window",
+      "label": "Delivery Window",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["morning", "afternoon", "evening", "next_day"]
+    },
+    {
+      "key": "delivery_notes",
+      "label": "Delivery Notes",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "filterAttributes": [
+    {
+      "key": "category",
+      "label": "Category",
+      "type": "string",
+      "required": false,
+      "customerVisible": false
+    },
+    {
+      "key": "brand",
+      "label": "Brand",
+      "type": "string",
+      "required": false,
+      "customerVisible": false
+    }
+  ],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "product_grid",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {
+    "intentHints": ["grocery_brand_inquiry", "grocery_delivery_inquiry"],
+    "recommendationStrategy": "category_first",
+    "requiresDeliveryEstimate": true,
+    "compatibilityCheckRequired": false
+  },
+  "promptFragments": [
+    "You sell grocery items. Confirm unit/weight and preferred delivery window."
+  ],
+  "isBuiltIn": true,
+  "tenantId": null
+}

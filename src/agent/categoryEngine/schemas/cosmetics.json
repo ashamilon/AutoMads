@@ -1,0 +1,114 @@
+{
+  "slug": "cosmetics",
+  "version": 1,
+  "attributes": [
+    {
+      "key": "shade",
+      "label": "Shade",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "skin_type",
+      "label": "Skin Type",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["oily", "dry", "combination", "normal", "sensitive"]
+    },
+    {
+      "key": "ingredients",
+      "label": "Ingredients",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "volume",
+      "label": "Volume",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "ml"
+    }
+  ],
+  "variantAttributes": [
+    {
+      "key": "shade",
+      "label": "Shade",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "volume",
+      "label": "Volume",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "ml"
+    }
+  ],
+  "orderAttributes": [
+    {
+      "key": "shade",
+      "label": "Shade",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "gift_wrap",
+      "label": "Gift Wrap",
+      "type": "boolean",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "filterAttributes": [
+    {
+      "key": "skin_type",
+      "label": "Skin Type",
+      "type": "enum",
+      "required": false,
+      "customerVisible": false,
+      "enumValues": ["oily", "dry", "combination", "normal", "sensitive"]
+    },
+    {
+      "key": "shade",
+      "label": "Shade",
+      "type": "string",
+      "required": false,
+      "customerVisible": false
+    }
+  ],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "shade_selector",
+    "skin_type_filter",
+    "ingredients_panel",
+    "product_grid",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {
+    "intentHints": ["cosmetics_shade_inquiry", "cosmetics_skin_type_inquiry"],
+    "recommendationStrategy": "shade_first",
+    "requiresDeliveryEstimate": false,
+    "compatibilityCheckRequired": false
+  },
+  "promptFragments": [
+    "You sell cosmetics. Confirm skin type and preferred shade before recommending."
+  ],
+  "isBuiltIn": true,
+  "tenantId": null
+}

@@ -43,6 +43,10 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11H5a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2h-4"></path><polyline points="9 11 9 7 15 7 15 11"></polyline><line x1="9" y1="15" x2="15" y2="15"></line></svg>
             <span>Orders</span>
           </a>
+          <a href="#/billing" data-route="billing" class="nav-item">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"></rect><line x1="2" y1="10" x2="22" y2="10"></line><line x1="6" y1="14" x2="10" y2="14"></line></svg>
+            <span>Billing</span>
+          </a>
           <a href="#/webhooks" data-route="webhooks" class="nav-item">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z"></path></svg>
             <span>Webhooks</span>
@@ -84,6 +88,20 @@
             </button>
           </div>
         </header>
+
+        <!--
+          Active category schema banner. Shown only when the operator is
+          looking at a specific tenant; populated via setSchemaBanner() in
+          app.js. Subtle background — must NOT look like a primary
+          control. The legacy admin remains the operator's primary tool;
+          this banner just surfaces the Commerce_OS schema context
+          (R20.6, R23.6).
+        -->
+        <div id="schemaBanner" class="schema-banner" hidden>
+          <span class="schema-banner-label">Active schema:</span>
+          <span class="schema-banner-slug" id="schemaBannerSlug">—</span>
+          <span class="schema-banner-meta" id="schemaBannerMeta"></span>
+        </div>
 
         <div id="view" class="view"></div>
       </main>

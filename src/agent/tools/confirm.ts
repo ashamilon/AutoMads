@@ -15,6 +15,7 @@ import { cancelPendingFollowUps, scheduleFollowUp } from "../followUp.js";
 import { recomputeStructuredCart } from "../state.js";
 import type { ToolDef } from "../types.js";
 import { persistValidationResult, readLatestValidation, runValidation } from "./validate.js";
+import { skuHasVariants } from "./missingSlots.js";
 
 
 const Args = z.object({}).strict();
@@ -250,12 +251,44 @@ export const confirmTools: ToolDef[] = [
       if (!profile.name) missing.push("name");
       if (!profile.phone) missing.push("phone");
       if (!profile.address) missing.push("address");
-      if (cart.some((c) => !c.size)) missing.push("size");
+
+      // "size" is only mandatory on lines whose SKU actually has variants
+      // (jersey M/L/XL, shoes 38-44, etc.). For non-variant products
+      // (cosmetics like a single-shade lipstick, a packaged restaurant
+      // dish, a single-spec electronic) the catalog row carries no
+      // `sizeStocks` / `variants[]`, and asking for a size would deadlock
+      // the order. We mirror the same `skuHasVariants` predicate that
+      // `missingSlots.ts` uses so the per-line missing-info bookkeeping
+      // and this confirm gate stay consistent.
+      const sizeRequiredLines: string[] = [];
+      for (const line of cart) {
+        if (line.size) continue;
+        const row = await prisma.productMapping
+          .findUnique({
+            where: {
+              tenantId_clientSku: { tenantId: ctx.input.tenantId, clientSku: line.sku },
+            },
+            select: { metadata: true },
+          })
+          .catch(() => null);
+        const meta =
+          row?.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+            ? (row.metadata as Record<string, unknown>)
+            : null;
+        if (skuHasVariants(meta)) sizeRequiredLines.push(line.sku);
+      }
+      if (sizeRequiredLines.length > 0) missing.push("size");
+
       if (missing.length > 0) {
         return {
           ok: false,
           error: "missing_fields",
-          observation: `Cannot confirm — missing: ${missing.join(", ")}. Ask the customer for these first.`,
+          observation:
+            `Cannot confirm — missing: ${missing.join(", ")}` +
+            (sizeRequiredLines.length > 0
+              ? ` (size needed for: ${sizeRequiredLines.join(", ")})`
+              : "") +
+            `. Ask the customer for these first.`,
         };
       }
       if (profile.phone && !isValidBdPhone(profile.phone)) {

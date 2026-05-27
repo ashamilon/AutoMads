@@ -731,6 +731,18 @@
       return;
     }
     setCrumbs([{ label: "Clients", href: "#/clients" }, { label: t.name }]);
+    setSchemaBanner(t);
+
+    // Fetch subscription summary so the detail page has a billing card. The
+    // endpoint may 404 for tenants without a subscription row (the demo tenant
+    // before bootstrap, for example) — render a graceful fallback in that case.
+    let sub = null;
+    try {
+      const subRes = await api(`/admin/subscriptions/${encodeURIComponent(id)}`);
+      sub = subRes.subscription;
+    } catch (_e) {
+      sub = null;
+    }
 
     const orders = state.ordersByTenant[id];
     const ordersTotal = orders ? orders.length : "…";
@@ -765,6 +777,39 @@
         ${kpiCard("Has API key", t.hasApiKey ? "Yes" : "No", I.key, "rgba(196, 181, 253, 0.16)")}
         ${kpiCard("Created", new Date(t.createdAt).toLocaleDateString(), I.users, "rgba(96, 165, 250, 0.16)")}
       </div>
+
+      ${sub ? `
+        <div class="card" style="margin-bottom:16px;">
+          <div class="card-head" style="padding:0;border:0;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
+            <h2>Subscription</h2>
+            <a class="ghost" href="#/billing">${I.open}<span>Open in billing</span></a>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;">
+            <div>
+              <div class="label-caps" style="color:var(--text-mute);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Plan</div>
+              <div style="font-weight:600;margin-top:4px;">${escapeHtml(sub.planName)}</div>
+              <div style="color:var(--text-mute);font-size:11px;">${escapeHtml(sub.priceBdt)} BDT/mo</div>
+            </div>
+            <div>
+              <div class="label-caps" style="color:var(--text-mute);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Status</div>
+              <div style="margin-top:4px;">${subscriptionBadge(sub.status)}</div>
+            </div>
+            <div>
+              <div class="label-caps" style="color:var(--text-mute);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Period end</div>
+              <div style="margin-top:4px;">${escapeHtml(formatDate(sub.currentPeriodEnd))}</div>
+              <div style="color:var(--text-mute);font-size:11px;">${sub.gracePeriodEndsAt ? `Grace ends ${escapeHtml(formatDate(sub.gracePeriodEndsAt))}` : ""}</div>
+            </div>
+            <div style="text-align:right;">
+              <button class="secondary" id="btnSubscriptionDetail">${I.open}<span>Manage</span></button>
+            </div>
+          </div>
+        </div>
+      ` : `
+        <div class="card" style="margin-bottom:16px;">
+          <div class="card-head" style="padding:0;border:0;margin-bottom:8px;"><h2>Subscription</h2></div>
+          <p class="lede" style="margin:0;">No subscription on file. The tenant will get a trial when they finish onboarding.</p>
+        </div>
+      `}
 
       <div class="detail-grid">
         <div class="card flush">
@@ -803,6 +848,10 @@
     `;
 
     // Wire actions
+    const btnDetail = $("#btnSubscriptionDetail");
+    if (btnDetail) {
+      btnDetail.onclick = () => openSubscriptionDetailModal(id);
+    }
     $("#btnRegen").onclick = async () => {
       const ok = await confirmModal({
         title: "Regenerate tenant API key",
@@ -1078,6 +1127,552 @@
     `;
   }
 
+  // -------------------- Billing ------------------------------------------
+  /**
+   * Billing page — three sub-views: Plans, Subscriptions, Payments.
+   * Routed via hash params (`#/billing?tab=plans`); defaults to Subscriptions.
+   * All data is fetched per tab so switching is fast.
+   */
+  async function pageBilling(params) {
+    setCrumbs([{ label: "Billing" }]);
+    const tab = params.tab === "plans" || params.tab === "payments" || params.tab === "gateway" ? params.tab : "subscriptions";
+    const v = $("#view");
+    v.innerHTML = `
+      <div class="page-head">
+        <div>
+          <h1>Billing</h1>
+          <p class="lede">Manage plans, subscriptions, and payments. Edits here apply immediately to every tenant on the affected plan.</p>
+        </div>
+        <button class="ghost" id="billingReload">${I.refresh}<span>Refresh</span></button>
+      </div>
+
+      <div class="toolbar">
+        <div class="chip-group" id="billingTabs">
+          <a href="#/billing?tab=subscriptions" class="chip ${tab === "subscriptions" ? "active" : ""}">Subscriptions</a>
+          <a href="#/billing?tab=plans" class="chip ${tab === "plans" ? "active" : ""}">Plans</a>
+          <a href="#/billing?tab=payments" class="chip ${tab === "payments" ? "active" : ""}">Payments</a>
+          <a href="#/billing?tab=gateway" class="chip ${tab === "gateway" ? "active" : ""}">Gateway</a>
+        </div>
+      </div>
+
+      <div id="billingBody"></div>
+    `;
+    $("#billingReload").onclick = () => pageBilling(params);
+
+    if (tab === "plans") return renderPlans();
+    if (tab === "payments") return renderPayments();
+    if (tab === "gateway") return renderGateway();
+    return renderSubscriptions();
+  }
+
+  async function renderSubscriptions() {
+    const host = $("#billingBody");
+    host.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text-mute);">Loading subscriptions…</div>`;
+    try {
+      const data = await api("/admin/subscriptions");
+      const subs = data.subscriptions || [];
+      if (subs.length === 0) {
+        host.innerHTML = emptyHTML("box", "No subscriptions yet", "When a tenant completes onboarding, their trial subscription will show up here.");
+        return;
+      }
+      host.innerHTML = `
+        <div class="card flush">
+          <div class="table-wrap"><table class="tbl">
+            <thead><tr>
+              <th>Tenant</th><th>Category</th><th>Plan</th><th>Status</th>
+              <th>Period end</th><th>Days left</th><th>Last payment</th><th class="right">Actions</th>
+            </tr></thead>
+            <tbody>
+              ${subs.map((s) => `
+                <tr data-tenant="${escapeHtml(s.tenantId)}">
+                  <td>
+                    <div class="row-name">
+                      <div class="avatar">${escapeHtml(initials(s.tenantName))}</div>
+                      <div class="row-meta">
+                        <strong>${escapeHtml(s.tenantName)}</strong>
+                        <span class="slug">${escapeHtml(s.tenantSlug)}</span>
+                      </div>
+                    </div>
+                  </td>
+                  <td style="color:var(--text-dim);">${s.businessCategory ? escapeHtml(s.businessCategory) : "—"}</td>
+                  <td>${escapeHtml(s.planName)} <span style="color:var(--text-mute);">(${escapeHtml(s.planSlug)})</span></td>
+                  <td>${subscriptionBadge(s.status)}</td>
+                  <td style="color:var(--text-mute);">${escapeHtml(formatDate(s.currentPeriodEnd))}</td>
+                  <td style="font-variant-numeric:tabular-nums;">${s.daysRemaining}d</td>
+                  <td>${paymentBadge(s.lastPaymentStatus)}</td>
+                  <td class="right">
+                    <button class="ghost btn-detail" data-tenant="${escapeHtml(s.tenantId)}">${I.open}<span>Open</span></button>
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table></div>
+        </div>
+      `;
+      $$("#billingBody .btn-detail").forEach((btn) => {
+        btn.onclick = () => openSubscriptionDetailModal(btn.dataset.tenant);
+      });
+    } catch (e) {
+      host.innerHTML = errorPanel(e.message);
+    }
+  }
+
+  async function renderPlans() {
+    const host = $("#billingBody");
+    host.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text-mute);">Loading plans…</div>`;
+    try {
+      const data = await api("/admin/plans");
+      const plans = data.plans || [];
+      if (plans.length === 0) {
+        host.innerHTML = emptyHTML("box", "No plans yet", "Run the bootstrap script to seed Starter / Pro / Agency / Enterprise.");
+        return;
+      }
+      host.innerHTML = `
+        <div class="card flush">
+          <div class="table-wrap"><table class="tbl">
+            <thead><tr><th>Plan</th><th>Price (BDT/mo)</th><th>Trial days</th><th>Limits</th><th>Active</th><th class="right"></th></tr></thead>
+            <tbody>
+              ${plans.map((p) => `
+                <tr data-plan="${escapeHtml(p.id)}">
+                  <td>
+                    <strong>${escapeHtml(p.displayName)}</strong>
+                    <div class="slug">${escapeHtml(p.slug)}</div>
+                  </td>
+                  <td style="font-variant-numeric:tabular-nums;font-weight:600;">${escapeHtml(p.priceBdt)}</td>
+                  <td>${p.trialDays}</td>
+                  <td style="color:var(--text-dim);max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:11px;">
+                    ${escapeHtml(formatLimits(p.limits))}
+                  </td>
+                  <td>${p.isActive ? '<span class="badge ok">active</span>' : '<span class="badge">inactive</span>'}</td>
+                  <td class="right">
+                    <button class="ghost btn-edit-plan" data-plan-id="${escapeHtml(p.id)}">${I.edit}<span>Edit</span></button>
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table></div>
+        </div>
+      `;
+      $$("#billingBody .btn-edit-plan").forEach((btn) => {
+        btn.onclick = () => openPlanEditModal(plans.find((p) => p.id === btn.dataset.planId));
+      });
+    } catch (e) {
+      host.innerHTML = errorPanel(e.message);
+    }
+  }
+
+  function formatLimits(limits) {
+    if (!limits || typeof limits !== "object") return "—";
+    const entries = Object.entries(limits);
+    if (entries.length === 0) return "—";
+    return entries.slice(0, 6).map(([k, v]) => `${k}=${v === -1 ? "∞" : v}`).join("  ");
+  }
+
+  function openPlanEditModal(plan) {
+    if (!plan) return;
+    const limitsJson = JSON.stringify(plan.limits ?? {}, null, 2);
+    const flagsJson = JSON.stringify(plan.featureFlags ?? {}, null, 2);
+    const body = el("div", { class: "form-grid" });
+    body.innerHTML = `
+      <div><label class="field">Display name</label><input name="displayName" value="${escapeHtml(plan.displayName)}" /></div>
+      <div><label class="field">Price (BDT)</label><input name="priceBdt" inputmode="decimal" value="${escapeHtml(plan.priceBdt)}" /></div>
+      <div><label class="field">Trial days</label><input name="trialDays" type="number" min="0" value="${plan.trialDays}" /></div>
+      <div><label class="field">Active</label>
+        <select name="isActive">
+          <option value="true" ${plan.isActive ? "selected" : ""}>Yes</option>
+          <option value="false" ${plan.isActive ? "" : "selected"}>No</option>
+        </select>
+      </div>
+      <div class="full"><label class="field">Limits (JSON)</label><textarea name="limits" rows="8">${escapeHtml(limitsJson)}</textarea></div>
+      <div class="full"><label class="field">Feature flags (JSON)</label><textarea name="featureFlags" rows="6">${escapeHtml(flagsJson)}</textarea></div>
+    `;
+    const cancel = el("button", { class: "ghost" }, "Cancel");
+    const save = el("button", { class: "primary" }, "Save changes");
+    const m = modal({ title: `Edit plan: ${plan.displayName}`, body, foot: [cancel, save], size: "lg" });
+    cancel.onclick = m.close;
+    save.onclick = async () => {
+      const get = (k) => body.querySelector(`[name="${k}"]`).value;
+      let limits, featureFlags;
+      try { limits = JSON.parse(get("limits")); }
+      catch { toast("Limits is not valid JSON", "err"); return; }
+      try { featureFlags = JSON.parse(get("featureFlags")); }
+      catch { toast("Feature flags is not valid JSON", "err"); return; }
+      const patch = {
+        displayName: get("displayName"),
+        priceBdt: Number(get("priceBdt")),
+        trialDays: Number(get("trialDays")),
+        isActive: get("isActive") === "true",
+        limits,
+        featureFlags,
+      };
+      try {
+        await api(`/admin/plans/${plan.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+        toast("Plan updated", "ok");
+        m.close();
+        renderPlans();
+      } catch (e) {
+        toast(e.message, "err");
+      }
+    };
+  }
+
+  async function renderPayments() {
+    const host = $("#billingBody");
+    host.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text-mute);">Loading payments…</div>`;
+    try {
+      const data = await api("/admin/payments");
+      const txns = data.payments || [];
+      if (txns.length === 0) {
+        host.innerHTML = emptyHTML("box", "No payments yet", "Subscription payments will land here once tenants pay through SSLCommerz.");
+        return;
+      }
+      host.innerHTML = `
+        <div class="card flush">
+          <div class="table-wrap"><table class="tbl">
+            <thead><tr>
+              <th>Created</th><th>Tenant</th><th>Gateway</th><th>Status</th>
+              <th class="right">Amount</th><th>Tran ID</th><th>Failures</th>
+            </tr></thead>
+            <tbody>
+              ${txns.map((t) => `
+                <tr>
+                  <td style="color:var(--text-mute);">${escapeHtml(timeAgo(t.createdAt))}</td>
+                  <td class="mono" style="font-size:11px;">${escapeHtml(t.tenantId.slice(0, 14))}…</td>
+                  <td>${escapeHtml(t.gateway)}</td>
+                  <td>${paymentBadge(t.status)}</td>
+                  <td class="right" style="font-variant-numeric:tabular-nums;">${escapeHtml(t.amountBdt)} BDT</td>
+                  <td class="mono" style="font-size:11px;">${t.sslcommerzTranId ? escapeHtml(t.sslcommerzTranId.slice(0, 16)) : "—"}</td>
+                  <td style="color:var(--danger);">${t.failures.length > 0 ? t.failures.length : "—"}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table></div>
+        </div>
+      `;
+    } catch (e) {
+      host.innerHTML = errorPanel(e.message);
+    }
+  }
+
+  async function openSubscriptionDetailModal(tenantId) {
+    let detail;
+    try {
+      detail = await api(`/admin/subscriptions/${encodeURIComponent(tenantId)}`);
+    } catch (e) {
+      toast(e.message, "err");
+      return;
+    }
+    const sub = detail.subscription;
+    const usage = detail.usage || {};
+    const limits = detail.planLimits || {};
+    const overrides = detail.overrides || {};
+    const pct = detail.percentageUsed || {};
+
+    const limitRows = Object.keys(limits).map((k) => {
+      const max = limits[k];
+      const counterMap = { maxMonthlyMessages: "messages", maxAiTokensMonthly: "aiTokens", maxPostingPerDay: "posts" };
+      const counterKey = counterMap[k];
+      const current = counterKey ? (usage[counterKey] ?? 0) : null;
+      const override = overrides[k];
+      return `
+        <tr>
+          <td class="mono" style="font-size:11px;">${escapeHtml(k)}</td>
+          <td>${typeof max === "boolean" ? (max ? "yes" : "no") : (max === -1 ? "∞" : escapeHtml(String(max)))}</td>
+          <td style="color:var(--warn);">${override === undefined ? "—" : escapeHtml(String(override))}</td>
+          <td>${current === null ? "—" : escapeHtml(String(current))}</td>
+          <td>${pct[k] === null || pct[k] === undefined ? "—" : escapeHtml(pct[k] + "%")}</td>
+        </tr>
+      `;
+    }).join("");
+
+    const body = el("div", {});
+    body.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
+        <div><div class="label-caps" style="color:var(--text-mute);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Tenant</div><div style="font-weight:600;">${escapeHtml(sub.tenantName)}</div></div>
+        <div><div class="label-caps" style="color:var(--text-mute);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Plan</div><div>${escapeHtml(sub.planName)} (${escapeHtml(sub.planSlug)}) — ${escapeHtml(sub.priceBdt)} BDT/mo</div></div>
+        <div><div class="label-caps" style="color:var(--text-mute);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Status</div>${subscriptionBadge(sub.status)}</div>
+        <div><div class="label-caps" style="color:var(--text-mute);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Period end</div><div>${escapeHtml(formatDate(sub.currentPeriodEnd))}</div></div>
+        ${sub.gracePeriodEndsAt ? `<div><div class="label-caps" style="color:var(--text-mute);font-size:10px;">Grace ends</div><div>${escapeHtml(formatDate(sub.gracePeriodEndsAt))}</div></div>` : ""}
+        ${sub.cancelledAt ? `<div><div class="label-caps" style="color:var(--text-mute);font-size:10px;">Cancelled at</div><div>${escapeHtml(formatDate(sub.cancelledAt))}</div></div>` : ""}
+      </div>
+
+      <h4 style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-mute);margin:20px 0 8px;">Limits + usage</h4>
+      <div class="table-wrap"><table class="tbl">
+        <thead><tr><th>Key</th><th>Plan max</th><th>Override</th><th>Current</th><th>Used</th></tr></thead>
+        <tbody>${limitRows}</tbody>
+      </table></div>
+
+      <h4 style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-mute);margin:20px 0 8px;">Recent transitions</h4>
+      <div style="max-height:200px;overflow:auto;font-size:11px;">
+        ${detail.recentLogs.map((l) => `
+          <div style="padding:6px 8px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px;">
+            <div><span class="mono">${escapeHtml(l.fromStatus ?? "—")} → ${escapeHtml(l.toStatus)}</span> · ${escapeHtml(l.reason)}</div>
+            <div style="color:var(--text-mute);">${escapeHtml(timeAgo(l.createdAt))} · ${escapeHtml(l.actor)}</div>
+          </div>
+        `).join("") || "<div style=\"padding:8px;color:var(--text-mute);\">No transitions recorded.</div>"}
+      </div>
+    `;
+
+    const suspendBtn = el("button", { class: "ghost" }, "Suspend");
+    const reactivateBtn = el("button", { class: "ghost" }, "Reactivate");
+    const cancelBtn = el("button", { class: "ghost" }, "Cancel");
+    const planBtn = el("button", { class: "secondary" }, "Change plan");
+    const overrideBtn = el("button", { class: "secondary" }, "Override limits");
+    const closeBtn = el("button", { class: "primary" }, "Close");
+
+    if (sub.status === "suspended") suspendBtn.disabled = true;
+    if (sub.status !== "suspended" && sub.status !== "overdue") reactivateBtn.disabled = true;
+    if (sub.status === "cancelled" || sub.status === "suspended") cancelBtn.disabled = true;
+
+    const m = modal({
+      title: `Subscription · ${sub.tenantName}`,
+      body,
+      foot: [suspendBtn, reactivateBtn, cancelBtn, planBtn, overrideBtn, closeBtn],
+      size: "lg",
+    });
+    closeBtn.onclick = m.close;
+
+    suspendBtn.onclick = () => promptReasonModal({
+      title: "Suspend tenant",
+      message: "All outbound messaging + posting will be paused. Data is preserved.",
+      onConfirm: async (reason) => {
+        await api(`/admin/subscriptions/${encodeURIComponent(tenantId)}/suspend`, {
+          method: "POST", body: JSON.stringify({ reason }),
+        });
+        toast("Suspended", "ok");
+        m.close();
+        renderSubscriptions();
+      },
+    });
+    reactivateBtn.onclick = () => promptReasonModal({
+      title: "Reactivate tenant",
+      message: "Outbound messaging + posting will resume within 5 minutes.",
+      onConfirm: async (reason) => {
+        await api(`/admin/subscriptions/${encodeURIComponent(tenantId)}/reactivate`, {
+          method: "POST", body: JSON.stringify({ reason }),
+        });
+        toast("Reactivated", "ok");
+        m.close();
+        renderSubscriptions();
+      },
+    });
+    cancelBtn.onclick = async () => {
+      const ok = await confirmModal({
+        title: "Cancel subscription",
+        message: "Status stays Active until the period ends; only the cancellation date is set immediately.",
+      });
+      if (!ok) return;
+      try {
+        await api(`/admin/subscriptions/${encodeURIComponent(tenantId)}/cancel`, { method: "POST" });
+        toast("Subscription cancelled (effective at period end)", "ok");
+        m.close();
+        renderSubscriptions();
+      } catch (e) { toast(e.message, "err"); }
+    };
+    planBtn.onclick = async () => {
+      let plansData;
+      try { plansData = await api("/admin/plans"); }
+      catch (e) { toast(e.message, "err"); return; }
+      const pickerBody = el("div", {});
+      pickerBody.innerHTML = `
+        <p class="lede">Pick a new plan for ${escapeHtml(sub.tenantName)}. Period dates and status are preserved.</p>
+        <select id="planPick" style="width:100%;margin-top:14px;">
+          ${plansData.plans.map((p) => `<option value="${escapeHtml(p.slug)}" ${p.slug === sub.planSlug ? "selected" : ""}>${escapeHtml(p.displayName)} — ${escapeHtml(p.priceBdt)} BDT/mo</option>`).join("")}
+        </select>
+      `;
+      const cb = el("button", { class: "ghost" }, "Cancel");
+      const sb = el("button", { class: "primary" }, "Change plan");
+      const pm = modal({ title: "Change plan", body: pickerBody, foot: [cb, sb] });
+      cb.onclick = pm.close;
+      sb.onclick = async () => {
+        const newSlug = pickerBody.querySelector("#planPick").value;
+        try {
+          await api(`/admin/subscriptions/${encodeURIComponent(tenantId)}/change-plan`, {
+            method: "POST", body: JSON.stringify({ planSlug: newSlug }),
+          });
+          toast("Plan changed", "ok");
+          pm.close(); m.close(); renderSubscriptions();
+        } catch (e) { toast(e.message, "err"); }
+      };
+    };
+    overrideBtn.onclick = () => {
+      const ovBody = el("div", {});
+      const initial = JSON.stringify(overrides ?? {}, null, 2);
+      ovBody.innerHTML = `
+        <p class="lede">Per-tenant overrides take precedence over the plan's limits and feature flags.</p>
+        <label class="field" style="margin-top:14px;">Overrides (JSON object)</label>
+        <textarea id="ovJson" rows="10" style="font-family:var(--font-mono);font-size:12px;">${escapeHtml(initial)}</textarea>
+        <p style="font-size:11px;color:var(--text-mute);margin-top:6px;">Example: <code>{"maxProducts":2000,"feature.aiPosting":true}</code></p>
+      `;
+      const cb = el("button", { class: "ghost" }, "Cancel");
+      const sb = el("button", { class: "primary" }, "Save overrides");
+      const om = modal({ title: "Override plan limits", body: ovBody, foot: [cb, sb], size: "lg" });
+      cb.onclick = om.close;
+      sb.onclick = async () => {
+        let parsed;
+        try { parsed = JSON.parse(ovBody.querySelector("#ovJson").value); }
+        catch { toast("Overrides is not valid JSON", "err"); return; }
+        try {
+          await api(`/admin/subscriptions/${encodeURIComponent(tenantId)}/override-limits`, {
+            method: "POST", body: JSON.stringify({ overrides: parsed }),
+          });
+          toast("Overrides saved", "ok");
+          om.close(); m.close(); openSubscriptionDetailModal(tenantId);
+        } catch (e) { toast(e.message, "err"); }
+      };
+    };
+  }
+
+  function promptReasonModal({ title, message, onConfirm }) {
+    const body = el("div", {});
+    body.innerHTML = `
+      <p class="lede">${escapeHtml(message)}</p>
+      <label class="field" style="margin-top:12px;">Reason (recorded in audit log)</label>
+      <textarea id="reasonInput" rows="3" placeholder="e.g. Manual reactivation - paid out-of-band"></textarea>
+    `;
+    const cancel = el("button", { class: "ghost" }, "Cancel");
+    const ok = el("button", { class: "primary" }, "Confirm");
+    const m = modal({ title, body, foot: [cancel, ok] });
+    cancel.onclick = m.close;
+    ok.onclick = async () => {
+      const reason = body.querySelector("#reasonInput").value.trim();
+      if (!reason) { toast("Reason is required", "err"); return; }
+      try {
+        await onConfirm(reason);
+      } catch (e) { toast(e.message, "err"); }
+    };
+  }
+
+  function subscriptionBadge(status) {
+    const map = {
+      trial: "info", active: "ok", overdue: "warn", suspended: "danger", cancelled: "violet",
+    };
+    const cls = map[status] || "";
+    return `<span class="badge ${cls}">${escapeHtml(status || "—")}</span>`;
+  }
+  function paymentBadge(status) {
+    if (!status) return '<span style="color:var(--text-mute);">—</span>';
+    const map = { success: "ok", pending: "warn", failed: "danger" };
+    return `<span class="badge ${map[status] || ""}">${escapeHtml(status)}</span>`;
+  }
+  function formatDate(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleDateString();
+  }
+
+  // -------------------- Billing → Gateway tab ----------------------------
+  /**
+   * Platform-billing SSLCommerz credentials editor. This is the store the
+   * SaaS operator uses to charge tenants for the subscription itself —
+   * NOT the per-tenant SSLCommerz store the tenant uses to take payments
+   * from their own customers (those live on tenant.settings.sslcommerz
+   * and are edited per tenant in Settings → Payments).
+   */
+  async function renderGateway() {
+    const host = $("#billingBody");
+    host.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text-mute);">Loading gateway…</div>`;
+    let data;
+    try {
+      data = await api("/admin/platform/gateway");
+    } catch (e) {
+      host.innerHTML = errorPanel(e.message);
+      return;
+    }
+    const c = data.creds || {};
+    const sourceLabel = {
+      db: "saved (database)",
+      env: "from environment variable",
+      fallback: "tenant-customer fallback (dev only)",
+      none: "not configured",
+    }[c.source] || c.source;
+    host.innerHTML = `
+      <div class="card" style="max-width:720px;">
+        <h2 style="margin:0 0 8px;font-size:16px;font-weight:600;">Platform-billing SSLCommerz</h2>
+        <p class="lede" style="margin-bottom:16px;">
+          The store the SaaS platform uses to charge tenants for their subscription.
+          This is separate from the per-tenant SSLCommerz store your clients use to take
+          payments from their own customers — those are configured per tenant in
+          Settings → Payments.
+        </p>
+        <p class="lede" style="margin-bottom:18px;font-size:12px;">
+          Current source: <strong>${escapeHtml(sourceLabel)}</strong>
+          ${c.hasStorePassword ? '· <span class="badge ok">secret set</span>' : '· <span class="badge warn">no secret</span>'}
+        </p>
+        <form id="gatewayForm" class="form-grid">
+          <div>
+            <label class="field">Store ID</label>
+            <input name="storeId" required value="${escapeHtml(c.storeId || "")}" placeholder="your_sslcz_store_id" />
+          </div>
+          <div>
+            <label class="field">Environment</label>
+            <select name="isSandbox">
+              <option value="true" ${c.isSandbox ? "selected" : ""}>Sandbox (test)</option>
+              <option value="false" ${c.isSandbox ? "" : "selected"}>Live (production)</option>
+            </select>
+          </div>
+          <div class="full">
+            <label class="field">Store Password / Secret</label>
+            <input name="storePassword" type="password" autocomplete="off" placeholder="${c.hasStorePassword ? "leave blank to keep existing" : "paste your sslcommerz store password"}" />
+            <p style="font-size:11px;color:var(--text-mute);margin-top:6px;">
+              Stored encrypted at rest. Never returned in API responses.
+            </p>
+          </div>
+          <div class="full" style="display:flex;gap:10px;justify-content:flex-end;margin-top:6px;">
+            <button type="button" class="ghost" id="testGateway">Test connection</button>
+            <button type="submit" class="primary">Save credentials</button>
+          </div>
+        </form>
+        <div id="gatewayResult" style="margin-top:18px;"></div>
+      </div>
+    `;
+    const form = $("#gatewayForm");
+    const resultHost = $("#gatewayResult");
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const fd = new FormData(form);
+      const body = {
+        storeId: fd.get("storeId") || "",
+        storePassword: fd.get("storePassword") || null,
+        isSandbox: fd.get("isSandbox") === "true",
+      };
+      try {
+        await api("/admin/platform/gateway", { method: "POST", body: JSON.stringify(body) });
+        toast("Credentials saved", "ok");
+        renderGateway();
+      } catch (e) {
+        toast(e.message, "err");
+      }
+    };
+    $("#testGateway").onclick = async () => {
+      resultHost.innerHTML = `<div style="display:flex;align-items:center;gap:8px;color:var(--text-mute);font-size:12px;"><div class="skeleton" style="height:12px;width:12px;border-radius:50%;"></div>Testing…</div>`;
+      try {
+        const r = await api("/admin/platform/gateway/test", { method: "POST" });
+        if (r.ok) {
+          resultHost.innerHTML = `<div class="card" style="border-color:rgba(74,222,128,0.3);background:rgba(74,222,128,0.05);">
+            <strong style="color:var(--ok);">SSLCommerz accepted these credentials.</strong>
+            <div style="font-size:12px;color:var(--text-dim);margin-top:6px;">
+              Environment: ${escapeHtml(r.environment)} · Status: ${escapeHtml(r.status)}
+            </div>
+          </div>`;
+        } else {
+          resultHost.innerHTML = `<div class="card" style="border-color:rgba(248,113,113,0.3);background:rgba(248,113,113,0.05);">
+            <strong style="color:var(--danger);">Test failed</strong>
+            <div style="font-size:12px;color:var(--text-dim);margin-top:6px;">
+              ${escapeHtml(r.error || "unknown error")} ${r.environment ? "· " + escapeHtml(r.environment) : ""}
+            </div>
+          </div>`;
+        }
+      } catch (e) {
+        resultHost.innerHTML = `<div class="card" style="border-color:rgba(248,113,113,0.3);background:rgba(248,113,113,0.05);">
+          <strong style="color:var(--danger);">Test failed</strong>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:6px;">${escapeHtml(e.message)}</div>
+        </div>`;
+      }
+    };
+  }
+
   // -------------------- Webhooks ------------------------------------------
   async function pageWebhooks() {
     setCrumbs([{ label: "Webhooks" }]);
@@ -1210,6 +1805,36 @@
     $("#crumbs").innerHTML = html;
   }
 
+  /**
+   * Show / hide the "Active schema" banner. Called from the client detail
+   * page once we've loaded the tenant row. The banner is purely
+   * informational — it surfaces the Commerce_OS category schema slug so
+   * operators can confirm which schema drives the AI / dashboard /
+   * order pipeline for the tenant they're looking at. Hides whenever
+   * we're not on a tenant-scoped page.
+   */
+  function setSchemaBanner(tenant) {
+    const banner = $("#schemaBanner");
+    if (!banner) return;
+    if (!tenant || (!tenant.categorySchemaSlug && !tenant.businessCategory)) {
+      banner.hidden = true;
+      return;
+    }
+    const slug = tenant.categorySchemaSlug || tenant.businessCategory || "—";
+    const meta = [];
+    if (tenant.businessCategory && tenant.businessCategory !== slug) {
+      meta.push(`category: ${tenant.businessCategory}`);
+    }
+    if (tenant.businessSubcategory) meta.push(`subcategory: ${tenant.businessSubcategory}`);
+    $("#schemaBannerSlug").textContent = slug;
+    $("#schemaBannerMeta").textContent = meta.length ? `· ${meta.join(" · ")}` : "";
+    banner.hidden = false;
+  }
+  function clearSchemaBanner() {
+    const banner = $("#schemaBanner");
+    if (banner) banner.hidden = true;
+  }
+
   // ----- Router ------------------------------------------------------------
   function parseHash() {
     const raw = location.hash.replace(/^#/, "") || "/dashboard";
@@ -1225,6 +1850,9 @@
   async function route() {
     const { segs, params } = parseHash();
     const [head, sub] = segs;
+    // Default: hide the per-tenant schema banner. The client-detail page
+    // re-shows it after loading the tenant row.
+    clearSchemaBanner();
     if (!head || head === "dashboard") {
       setActiveNav("dashboard");
       return pageDashboard();
@@ -1238,6 +1866,10 @@
     if (head === "orders") {
       setActiveNav("orders");
       return pageOrders(params);
+    }
+    if (head === "billing") {
+      setActiveNav("billing");
+      return pageBilling(params);
     }
     if (head === "webhooks") {
       setActiveNav("webhooks");

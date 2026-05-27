@@ -60,6 +60,14 @@ import {
 } from "./referenceResolver.js";
 import { askRouter, type RouterOk } from "./router.js";
 import {
+  buildReasoningContext,
+  type ReasoningContext,
+} from "./context/reasoningContext.js";
+import {
+  MissingTenantScopeError,
+  ReasoningContextIncompleteError,
+} from "./context/reasoningContextErrors.js";
+import {
   appendRecentReference,
   canTransition,
   CONFIDENCE_THRESHOLDS,
@@ -1404,9 +1412,21 @@ async function generateResponse(state: LoopState): Promise<Partial<LoopState>> {
 
   // Run the handler. Persistence inside `ctx.saveSnapshot` updates our working
   // copy so subsequent stages see the post-tool snapshot.
+  //
+  // Reasoning_Context propagation (task 3.3): the loop pulls `tenantId` and
+  // the frozen `reasoningContext` from the turn input and pins them on the
+  // `ToolHandlerCtx` so every tool sees the same scope. The registry's
+  // wrapper (`tools/registry.ts::withTenantScopeGuard`) will read the
+  // tenant id from this object before delegating to the underlying handler;
+  // tools that need category/identity/plan data should read them off
+  // `ctx.reasoningContext` rather than re-issuing DB lookups.
   const handlerCtx: ToolHandlerCtx = {
     input: state.input,
     snapshot: ctx.workingSnapshot,
+    tenantId: state.input.tenantId,
+    ...(state.input.reasoningContext
+      ? { reasoningContext: state.input.reasoningContext }
+      : {}),
     saveSnapshot: async (next: AgentSnapshot) => {
       ctx.workingSnapshot = next;
       if (state.input.conversationId) {
@@ -1787,6 +1807,21 @@ function getAgentGraph(): ReturnType<typeof buildAgentGraph> {
  *
  * The caller is responsible for actually delivering `outcome.reply` (the reply
  * tool's handler also sends to Messenger; this layer just surfaces the text).
+ *
+ * Reasoning_Context wiring (Multi-Tenant Commerce OS task 3.3):
+ *   - When `args.input.reasoningContext` is undefined, build it here BEFORE
+ *     `observe_input` runs. The runner / router path supplies a pre-built
+ *     context so this path is mainly for tests and direct callers.
+ *   - `ReasoningContextIncompleteError` short-circuits with reason
+ *     `reasoning_context_incomplete` (Req 7.6).
+ *   - `MissingTenantScopeError` short-circuits with reason
+ *     `tenant_scope_missing` (Req 6.1, 6.3).
+ *   - When the resolved subscription's `isOperational` is `false`, the
+ *     loop short-circuits with reason `subscription_not_operational` and
+ *     emits NO outbound message — the inbound is logged via
+ *     `persistTurnTrace` but no reply is sent (Req 12.4, 18.4). The runner
+ *     (`runAgentInbound`) is responsible for skipping the legacy fallback
+ *     reply when this reason is returned.
  */
 export async function runAgentTurn(args: {
   input: AgentTurnInput;
@@ -1794,8 +1829,129 @@ export async function runAgentTurn(args: {
   turnId?: string;
 }): Promise<AgentRunOutcome> {
   const turnId = args.turnId ?? newTurnId();
+
+  // ── Resolve the Reasoning_Context BEFORE observe_input ──────────────────
+  //
+  // Production callers (router → loop) pass a pre-built `reasoningContext`
+  // on `input` so we avoid the second DB round-trip. When absent, we build
+  // it here. Both error classes from `buildReasoningContext` short-circuit
+  // the turn — we do NOT want to enter the StateGraph with an undefined or
+  // partial context because tools downstream rely on `ctx.tenantId` /
+  // `ctx.reasoningContext` being grounded (R6.2, R7.6).
+  let resolvedInput: AgentTurnInput = args.input;
+  if (!resolvedInput.reasoningContext) {
+    try {
+      const built = await buildReasoningContext({
+        tenantId: resolvedInput.tenantId,
+        ...(resolvedInput.conversationId
+          ? { conversationId: resolvedInput.conversationId }
+          : {}),
+      });
+      resolvedInput = { ...resolvedInput, reasoningContext: built };
+    } catch (e) {
+      // Tenant id missing / unresolvable. Refuse the turn before any tool
+      // runs — never invoke an outbound surface without a grounded scope.
+      if (e instanceof MissingTenantScopeError) {
+        logger.warn(
+          {
+            event: "tenant_isolation_violation",
+            turnId,
+            tenantId: resolvedInput.tenantId,
+            conversationId: resolvedInput.conversationId,
+          },
+          "agent.runAgentTurn refusing turn: tenant scope missing",
+        );
+        const outcome: AgentRunOutcome = {
+          steps: [],
+          reason: "tenant_scope_missing",
+          reply: null,
+        };
+        await persistTurnTrace({ input: args.input, turnId, outcome }).catch(
+          () => undefined,
+        );
+        return outcome;
+      }
+      // Tenant exists but Reasoning_Context could not be fully populated
+      // (e.g. tenant has no `businessCategory` because onboarding hasn't
+      // stamped it yet). R7.6 says abort instead of producing a reply.
+      if (e instanceof ReasoningContextIncompleteError) {
+        logger.warn(
+          {
+            event: "reasoning_context_incomplete",
+            turnId,
+            tenantId: resolvedInput.tenantId,
+            conversationId: resolvedInput.conversationId,
+            missingKeys: e.missingKeys,
+          },
+          "agent.runAgentTurn refusing turn: reasoning context incomplete",
+        );
+        const outcome: AgentRunOutcome = {
+          steps: [],
+          reason: "reasoning_context_incomplete",
+          reply: null,
+        };
+        await persistTurnTrace({ input: args.input, turnId, outcome }).catch(
+          () => undefined,
+        );
+        return outcome;
+      }
+      // Unexpected error type — surface as router_error so the runner's
+      // generic fallback path can take over without leaking the original
+      // exception class to callers.
+      logger.error(
+        {
+          e: String(e),
+          turnId,
+          tenantId: resolvedInput.tenantId,
+        },
+        "agent.runAgentTurn buildReasoningContext threw",
+      );
+      const outcome: AgentRunOutcome = {
+        steps: [],
+        reason: "router_error",
+        reply: null,
+      };
+      await persistTurnTrace({ input: args.input, turnId, outcome }).catch(
+        () => undefined,
+      );
+      return outcome;
+    }
+  }
+
+  // ── Outbound short-circuit when subscription is not operational ─────────
+  //
+  // R12.4 / R18.4: when the tenant's subscription is suspended (or otherwise
+  // non-operational), Messenger replies, content publishes, and follow-up
+  // sends MUST NOT fire. We log the inbound here (already persisted by the
+  // runner's webhook handler) and exit before the StateGraph runs so no
+  // tool can emit outbound work. The reply tool's send-side stays
+  // unreached, so a tenant in this state never accidentally messages a
+  // customer back.
+  const rc = resolvedInput.reasoningContext;
+  if (rc && rc.subscription.isOperational === false) {
+    logger.warn(
+      {
+        event: "agent_turn_suspended_short_circuit",
+        turnId,
+        tenantId: rc.tenantId,
+        conversationId: resolvedInput.conversationId,
+        subscriptionStatus: rc.subscription.status,
+      },
+      "agent.runAgentTurn refusing turn: subscription not operational",
+    );
+    const outcome: AgentRunOutcome = {
+      steps: [],
+      reason: "subscription_not_operational",
+      reply: null,
+    };
+    await persistTurnTrace({ input: args.input, turnId, outcome }).catch(
+      () => undefined,
+    );
+    return outcome;
+  }
+
   const initial: LoopState = {
-    input: args.input,
+    input: resolvedInput,
     history: args.history,
     snapshot: {
       cart: [],
@@ -1836,7 +1992,7 @@ export async function runAgentTurn(args: {
       reason: "router_error",
       reply: null,
     };
-    await persistTurnTrace({ input: args.input, turnId, outcome });
+    await persistTurnTrace({ input: resolvedInput, turnId, outcome });
     return outcome;
   }
 
@@ -1845,6 +2001,6 @@ export async function runAgentTurn(args: {
     reason: final.reason ?? (final.done ? "terminal" : "max_iter"),
     reply: final.reply,
   };
-  await persistTurnTrace({ input: args.input, turnId, outcome });
+  await persistTurnTrace({ input: resolvedInput, turnId, outcome });
   return outcome;
 }

@@ -229,18 +229,53 @@ export async function askRouter(args: {
 
   const t0 = Date.now();
   let raw = "";
-  // Resolve the persona for this tenant — defaults to "Karim, Moderator of this Page".
-  // Cheap: one indexed Prisma read per LLM call. Robust to lookup failure
-  // (we just fall back to the default identity).
-  const tenant = await prisma.tenant
-    .findUnique({
-      where: { id: args.input.tenantId },
-      select: { settings: true },
-    })
-    .catch(() => null);
-  const persona = parseTenantSettings(tenant?.settings).botPersona;
-  const identity = resolvePersonaIdentity(persona);
-  const systemPrompt = buildAgentSystemPrompt(identity);
+  // Resolve the persona for this tenant. Prefer the Reasoning_Context that
+  // the runner / `runAgentTurn` already built once per turn (Multi-Tenant
+  // Commerce OS task 3.3) — its `agentIdentity` already merged the per-tenant
+  // override over the category default over the platform default. Falling
+  // back to the legacy single-Prisma-read path keeps direct callers working
+  // (tests, simulators) when no Reasoning_Context was plumbed through.
+  let identity: ReturnType<typeof resolvePersonaIdentity>;
+  let audienceHint:
+    | { addressCanonical: string; addressStyle: string; targetAudienceLabel?: string }
+    | undefined;
+  const rc = args.input.reasoningContext;
+  if (rc && rc.agentIdentity) {
+    // The Reasoning_Context already resolved name + role through the same
+    // chain `resolvePersonaIdentity` would have used; pass it through.
+    identity = resolvePersonaIdentity({
+      name: rc.agentIdentity.name,
+      role: rc.agentIdentity.role,
+    });
+    if (rc.audience) {
+      const styleToCanonical: Record<string, string> = {
+        bhaiya: "Vaiya",
+        apu: "Apu",
+        sir: "Sir",
+        madam: "Madam",
+        bondhu: "Bondhu",
+      };
+      const audienceList = rc.audience.profile?.targetAudience ?? [];
+      const targetAudienceLabel =
+        audienceList.length > 0 ? audienceList.join(" + ") : undefined;
+      audienceHint = {
+        addressStyle: rc.audience.address.style,
+        addressCanonical:
+          styleToCanonical[rc.audience.address.style] ?? "Vaiya",
+        ...(targetAudienceLabel ? { targetAudienceLabel } : {}),
+      };
+    }
+  } else {
+    const tenant = await prisma.tenant
+      .findUnique({
+        where: { id: args.input.tenantId },
+        select: { settings: true },
+      })
+      .catch(() => null);
+    const persona = parseTenantSettings(tenant?.settings).botPersona;
+    identity = resolvePersonaIdentity(persona);
+  }
+  const systemPrompt = buildAgentSystemPrompt(identity, audienceHint);
   try {
     const res = await axios.post(
       `${config.ollamaBaseUrl.replace(/\/$/, "")}/api/chat`,

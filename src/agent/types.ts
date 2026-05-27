@@ -1,8 +1,17 @@
 import type { z } from "zod";
 import type { OrderFSMState } from "./state.js";
+// `import type` (not a runtime import) keeps the dependency graph clean —
+// `types.ts` is loaded by every tool module and the loop, while
+// `context/reasoningContext.ts` pulls in Prisma, the Category Engine, the
+// Agent_Identity service, plan limits, and subscription state. Going through
+// the value side here would create an import cycle (loop → tools/registry →
+// tools/* → types → context/reasoningContext → ... → loop). The type-only
+// import is erased at compile time and stays cycle-free.
+import type { ReasoningContext } from "./context/reasoningContext.js";
 
 // Re-export for downstream consumers that import from "./types.js".
 export type { OrderFSMState };
+export type { ReasoningContext };
 
 /** Per-turn input passed in from the webhook handler. */
 export type AgentTurnInput = {
@@ -14,6 +23,20 @@ export type AgentTurnInput = {
   imageUrls: string[];
   pageAccessToken: string;
   within24h: boolean;
+  /**
+   * Resolved Reasoning_Context for this turn (Multi-Tenant Commerce OS task 3.3).
+   *
+   * When the runner / router has already built the context (the common case in
+   * production — `runAgentInbound` calls `buildReasoningContext` once per turn
+   * and passes the frozen object through here), the loop reuses it instead of
+   * re-resolving. When absent, `runAgentTurn` builds one before `observe_input`
+   * runs and short-circuits with `reasoning_context_incomplete` /
+   * `tenant_scope_missing` if construction fails.
+   *
+   * Tools should read tenant-scoped data through `ToolHandlerCtx.reasoningContext`
+   * rather than re-issuing their own tenant lookups.
+   */
+  reasoningContext?: ReasoningContext;
 };
 
 export type AgentCartAddOn = {
@@ -197,6 +220,26 @@ export interface ToolHandlerCtx {
   readonly snapshot: AgentSnapshot;
   /** Persist a new snapshot to DB and update the in-flight working copy. */
   saveSnapshot(next: AgentSnapshot): Promise<void>;
+  /**
+   * Tenant id for this turn (Multi-Tenant Commerce OS task 3.3, Req 6.1/6.2).
+   *
+   * Mirrors `input.tenantId` and is provided redundantly so the registry's
+   * `tenant_isolation_violation` guard can read a single canonical key without
+   * having to dig into `input`. Tools that build Prisma `where` clauses MUST
+   * include this id (R6.2). The registry wrapper rejects calls where this is
+   * falsy with a `MissingTenantScopeError` before the handler runs.
+   */
+  readonly tenantId?: string;
+  /**
+   * Resolved Reasoning_Context (Multi-Tenant Commerce OS task 3.3, Req 7.1).
+   *
+   * Optional only because legacy test fixtures construct `ToolHandlerCtx`
+   * objects directly without going through the loop. Production call sites
+   * (router → loop → tool registry wrapper) always populate this. Tools that
+   * need category/identity/plan data should read it from here rather than
+   * re-issuing DB lookups.
+   */
+  readonly reasoningContext?: ReasoningContext;
 }
 
 /** A single registered tool. params come in as `unknown` so the registry can hold heterogeneous tools. */
@@ -298,6 +341,31 @@ export type AgentStepLog = {
 
 export type AgentRunOutcome = {
   steps: AgentStepLog[];
-  reason: "terminal" | "max_iter" | "router_error";
+  /**
+   * Why the loop stopped:
+   *   - `terminal`                       — a terminal tool (`reply` /
+   *                                         `escalate_to_human`) ran successfully.
+   *   - `max_iter`                       — the iteration cap was reached.
+   *   - `router_error`                   — the router LLM threw or returned
+   *                                         malformed output past retry.
+   *   - `reasoning_context_incomplete`   — `buildReasoningContext` raised
+   *                                         `ReasoningContextIncompleteError`
+   *                                         before `observe_input` (Req 7.6).
+   *   - `tenant_scope_missing`           — `buildReasoningContext` raised
+   *                                         `MissingTenantScopeError` before
+   *                                         `observe_input` (Req 6.1, 6.3).
+   *   - `subscription_not_operational`   — outbound short-circuit when
+   *                                         `reasoningContext.subscription.isOperational
+   *                                         === false`. The inbound message
+   *                                         is logged but no reply is sent
+   *                                         (Req 12.4, 18.4).
+   */
+  reason:
+    | "terminal"
+    | "max_iter"
+    | "router_error"
+    | "reasoning_context_incomplete"
+    | "tenant_scope_missing"
+    | "subscription_not_operational";
   reply: string | null;
 };

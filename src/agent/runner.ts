@@ -9,6 +9,12 @@ import { cancelPendingFollowUps } from "./followUp.js";
 import { sanitizeCustomerReply } from "./replyFilter.js";
 import { ABANDONED_CART_TIMEOUT_MS, loadSnapshot, type OrderFSMState } from "./state.js";
 import { newTurnId } from "./trace.js";
+import { buildReasoningContext } from "./context/reasoningContext.js";
+import {
+  MissingTenantScopeError,
+  ReasoningContextIncompleteError,
+} from "./context/reasoningContextErrors.js";
+import { lockConversationAddress } from "./audience/persistConversationAddress.js";
 import type { AgentSnapshot, AgentStepLog, AgentTurnInput } from "./types.js";
 
 /**
@@ -285,8 +291,113 @@ export async function runAgentInbound(input: AgentTurnInput): Promise<AgentRunRe
 
   const turnId = newTurnId();
 
+  // Build the Reasoning_Context once per turn (Multi-Tenant Commerce OS
+  // task 3.3). This consolidates tenant + categorySchema + agentIdentity +
+  // planLimits + subscription resolution into a single frozen object that
+  // every downstream stage reads. Refusal paths:
+  //
+  //   - `MissingTenantScopeError`         → `tenant_isolation_violation`,
+  //                                         skip the loop entirely (R6.1, R6.3).
+  //   - `ReasoningContextIncompleteError` → `reasoning_context_incomplete`,
+  //                                         skip the loop entirely (R7.6).
+  //   - `subscription.isOperational===false` → `subscription_not_operational`,
+  //                                         skip the loop AND the legacy
+  //                                         fallback so suspended tenants
+  //                                         never message a customer (R12.4,
+  //                                         R18.4). The runner returns
+  //                                         "errored" so the webhook handler
+  //                                         records the inbound but does not
+  //                                         emit any outbound surface.
+  //
+  // We pre-build here (rather than letting `runAgentTurn` build it lazily)
+  // so the suspension short-circuit can also gate the legacy fallback that
+  // `runAgentInbound` would otherwise call on its error path.
+  let reasoningContextInput: AgentTurnInput = input;
   try {
-    const outcome = await runAgentTurn({ input, history, turnId });
+    const rc = await buildReasoningContext({
+      tenantId: input.tenantId,
+      ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+    });
+    if (rc.subscription.isOperational === false) {
+      logger.warn(
+        {
+          event: "agent_inbound_suspended_short_circuit",
+          tenantId: rc.tenantId,
+          conversationId: input.conversationId,
+          subscriptionStatus: rc.subscription.status,
+          turnId,
+        },
+        "agent.runner refusing inbound: subscription not operational",
+      );
+      // No outbound at all — not even the candid fallback. The customer
+      // simply gets no reply for this turn; legacy SHOULD NOT re-run for
+      // a suspended tenant either. Return "errored" because the inbound
+      // was effectively dropped on the floor; the webhook handler treats
+      // "errored" as a no-op for legacy.
+      return "errored";
+    }
+    reasoningContextInput = { ...input, reasoningContext: rc };
+    // Lock the resolved address style on the conversation so subsequent
+    // turns stay consistent (R7.1). We only lock when the source is
+    // `customer_cue` — i.e. the customer's latest message produced an
+    // unambiguous cue. Tenant/category/platform defaults are NOT
+    // persisted because they're already derivable on every turn from
+    // the tenant config; persisting them would freeze a stale default
+    // even after the operator changes the tenant default in Settings.
+    if (
+      input.conversationId &&
+      rc.audience.address.source === "customer_cue" &&
+      !rc.audience.address.lockedFromConversation
+    ) {
+      await lockConversationAddress(
+        input.conversationId,
+        rc.audience.address.style,
+      ).catch(() => undefined);
+    }
+  } catch (e) {
+    if (e instanceof MissingTenantScopeError) {
+      logger.warn(
+        {
+          event: "tenant_isolation_violation",
+          tenantId: input.tenantId,
+          conversationId: input.conversationId,
+          turnId,
+        },
+        "agent.runner refusing inbound: tenant scope missing",
+      );
+      return "errored";
+    }
+    if (e instanceof ReasoningContextIncompleteError) {
+      logger.warn(
+        {
+          event: "reasoning_context_incomplete",
+          tenantId: input.tenantId,
+          conversationId: input.conversationId,
+          missingKeys: e.missingKeys,
+          turnId,
+        },
+        "agent.runner refusing inbound: reasoning context incomplete",
+      );
+      // Onboarding is still pending or the tenant has no businessCategory
+      // — the legacy admin path will see the inbound and the operator can
+      // finish onboarding. We do NOT emit any outbound here.
+      return "errored";
+    }
+    // Any other error during context build: log and fall through to the
+    // existing flow with no `reasoningContext`. `runAgentTurn` will
+    // attempt to rebuild and surface a router_error if it also fails.
+    logger.warn(
+      { e: String(e), tenantId: input.tenantId, turnId },
+      "agent.runner buildReasoningContext threw; proceeding without preloaded context",
+    );
+  }
+
+  try {
+    const outcome = await runAgentTurn({
+      input: reasoningContextInput,
+      history,
+      turnId,
+    });
     logger.info(
       {
         tenantId: input.tenantId,
@@ -304,6 +415,18 @@ export async function runAgentInbound(input: AgentTurnInput): Promise<AgentRunRe
       },
       "AGENT_TURN_TRACE",
     );
+
+    // Reasoning_Context refusal reasons (task 3.3): the loop already logged
+    // and persisted the trace; the runner MUST NOT emit a fallback reply
+    // for these. Returning "errored" tells the webhook handler to skip the
+    // legacy path so no outbound surface fires.
+    if (
+      outcome.reason === "reasoning_context_incomplete" ||
+      outcome.reason === "tenant_scope_missing" ||
+      outcome.reason === "subscription_not_operational"
+    ) {
+      return "errored";
+    }
 
     if (outcome.reason === "terminal" && outcome.reply != null) return "handled";
     if (outcome.steps.some((s: AgentStepLog) => s.tool === "reply" && s.ok)) return "handled";

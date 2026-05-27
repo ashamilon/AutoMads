@@ -71,19 +71,36 @@ model Tenant {
   activationExpiresAt     DateTime?
   /// e.g. { "defaultOrderAmountBdt": 500, "sslcommerz": { "storeId": "..." }, "pathao": { ... } }
   settings                Json?
+  /// Commerce_OS multi-tenant deltas (R1, R2, R5, R14). All optional so existing
+  /// jersey demo tenant rows continue to read/write unchanged. Category-specific
+  /// data lives in JSON columns; no per-category physical columns (R3.1, R3.6, R14.6).
+  businessCategory        String?
+  businessSubcategory     String?
+  categorySchemaId        String?
+  dashboardTemplate       String?
+  onboardingCompletedAt   DateTime?
+  onboardingState         Json?
+  agentIdentity           Json?
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
 
-  integration       TenantIntegration?
-  orders            Order[]
-  productMappings   ProductMapping[]
-  conversations     MessengerConversation[]
-  knowledgeExamples KnowledgeExample[]
-  scheduledPosts    ScheduledPost[]
-  customerProfiles  CustomerProfile[]
-  followUps         FollowUp[]
-  agentTraces       AgentTrace[]
-  sessions          TenantSession[]
+  integration         TenantIntegration?
+  orders              Order[]
+  productMappings     ProductMapping[]
+  conversations       MessengerConversation[]
+  knowledgeExamples   KnowledgeExample[]
+  scheduledPosts      ScheduledPost[]
+  customerProfiles    CustomerProfile[]
+  followUps           FollowUp[]
+  agentTraces         AgentTrace[]
+  sessions            TenantSession[]
+  categorySchema      CategorySchema?      @relation(fields: [categorySchemaId], references: [id])
+  subscription        Subscription?
+  notifications       Notification[]
+  invoices            Invoice[]
+  paymentTransactions PaymentTransaction[]
+  subscriptionLogs    SubscriptionLog[]
+  paymentFailures     PaymentFailure[]
 }
 
 /// Browser-session token issued after a successful email + password login.
@@ -343,4 +360,272 @@ model AgentTrace {
   @@index([tenantId, createdAt])
   @@index([tenantId, conversationId, createdAt])
   @@index([turnId])
+}
+
+// ---------------------------------------------------------------------------
+// Commerce_OS multi-tenant plane (R2, R10-R16, R20)
+// All deltas applied via `prisma db push` only — no `prisma/migrations/` files
+// (R14.3, R23.3). Category-specific data lives in JSON columns; universal
+// columns `sslcommerzTranId` / `sslcommerzSessionKey` are reused for every
+// gateway (R14.2, R22.4).
+// ---------------------------------------------------------------------------
+
+/// Per-category configuration: attribute fields, terminology, dashboard
+/// modules, workflow rules, prompt fragments. Built-in rows ship with
+/// `isBuiltIn=true` and `tenantId=null`; tenant-cloned customizations carry
+/// `tenantId` (R2.1, R2.4, R3.1).
+model CategorySchema {
+  id                String   @id @default(cuid())
+  slug              String
+  version           Int      @default(1)
+  attributes        Json
+  variantAttributes Json
+  orderAttributes   Json
+  filterAttributes  Json
+  terminology       Json
+  dashboardModules  Json
+  workflowRules     Json
+  promptFragments   Json
+  isBuiltIn         Boolean  @default(false)
+  tenantId          String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  tenants Tenant[]
+
+  @@index([slug])
+  @@index([tenantId])
+}
+
+/// Subscription tier definitions (Starter / Pro / Agency / Enterprise).
+/// `limits` and `featureFlags` are JSON so new flags/limits can be added
+/// without schema changes (R15.1, R15.2, R16.1).
+model Plan {
+  id           String   @id @default(cuid())
+  slug         String   @unique
+  displayName  String
+  billingCycle String   @default("monthly")
+  priceBdt     Decimal  @db.Decimal(12, 2)
+  trialDays    Int      @default(14)
+  limits       Json
+  featureFlags Json
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  subscriptions Subscription[]
+}
+
+/// Per-tenant subscription state machine row (R10.1, R10.2). Status is one of
+/// 'trial' | 'active' | 'overdue' | 'suspended' | 'cancelled'. Usage counters
+/// reset on `currentPeriodStart` advance (R15.5).
+model Subscription {
+  id                 String    @id @default(cuid())
+  tenantId           String    @unique
+  tenant             Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  planId             String
+  plan               Plan      @relation(fields: [planId], references: [id])
+  status             String
+  trialEndsAt        DateTime?
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  gracePeriodEndsAt  DateTime?
+  cancelledAt        DateTime?
+  nextBillingAt      DateTime?
+  billingCycle       String    @default("monthly")
+  planLimitOverrides Json?
+  usageCounters      Json?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  invoices             Invoice[]
+  gracePeriodTrackings GracePeriodTracking[]
+
+  @@index([status])
+  @@index([currentPeriodEnd])
+  @@index([gracePeriodEndsAt])
+}
+
+/// One billable period per subscription. PDF reference and the universal
+/// SSLCommerz columns live here; gateway-specific columns are NOT added
+/// (R11.4, R14.2, R22.4).
+model Invoice {
+  id                   String       @id @default(cuid())
+  subscriptionId       String
+  subscription         Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  tenantId             String
+  tenant               Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  periodStart          DateTime
+  periodEnd            DateTime
+  amountBdt            Decimal      @db.Decimal(12, 2)
+  currency             String       @default("BDT")
+  status               String
+  pdfPath              String?
+  sslcommerzTranId     String?
+  sslcommerzSessionKey String?
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  paymentTransactions PaymentTransaction[]
+
+  @@index([tenantId])
+  @@index([status])
+}
+
+/// One payment attempt per invoice. `gateway` is a free-form string so
+/// SSLCommerz, AamarPay and bKash all flow through the same row shape
+/// (R11.1, R14.2, R22.4). Only universal SSLCommerz columns are stored.
+model PaymentTransaction {
+  id                   String   @id @default(cuid())
+  invoiceId            String
+  invoice              Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  tenantId             String
+  tenant               Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  gateway              String
+  amountBdt            Decimal  @db.Decimal(12, 2)
+  status               String
+  sslcommerzTranId     String?  @unique
+  sslcommerzSessionKey String?
+  rawPayload           Json?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  paymentFailures PaymentFailure[]
+
+  @@index([tenantId])
+  @@index([status])
+}
+
+/// Audit row written on every Subscription state transition (R10.7, R12.7,
+/// R15.6). `actor` is one of 'system' | 'super_admin:<id>' | 'tenant:<id>'.
+model SubscriptionLog {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  fromStatus String?
+  toStatus   String
+  reason     String
+  actor      String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+/// One row per failed payment attempt. Subscription status is NOT changed
+/// here — that is handled by the grace-period scheduler (R11.3).
+model PaymentFailure {
+  id            String              @id @default(cuid())
+  tenantId      String
+  tenant        Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  transactionId String?
+  transaction   PaymentTransaction? @relation(fields: [transactionId], references: [id])
+  reason        String
+  rawPayload    Json?
+  createdAt     DateTime            @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+/// Tracks Day 0 / Day 1 / Day 2 grace-period warnings so re-firing the cron
+/// never double-sends (R12.1, R12.2, R12.3). The `(subscriptionId, day,
+/// channel)` unique constraint enforces the idempotency.
+model GracePeriodTracking {
+  id             String       @id @default(cuid())
+  subscriptionId String
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  tenantId       String
+  day            Int
+  warningSentAt  DateTime     @default(now())
+  channel        String
+
+  @@unique([subscriptionId, day, channel])
+}
+
+/// Persisted notifications across all channels. The dashboard channel reads
+/// unread rows; email / telegram / whatsapp / facebook adapters update
+/// `status`, `attempts`, `sentAt` (R13.3, R13.4, R13.5).
+model Notification {
+  id        String    @id @default(cuid())
+  tenantId  String
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  channel   String
+  type      String
+  payload   Json
+  status    String
+  attempts  Int       @default(0)
+  createdAt DateTime  @default(now())
+  sentAt    DateTime?
+  readAt    DateTime?
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, status])
+}
+
+/// Platform-operator account, distinct from TenantSession (R20.7, R6.5).
+/// Passwords hashed with bcryptjs (R23.5). The first SuperAdmin row is
+/// seeded by `bootstrapSuperAdmin()` from `SUPER_ADMIN_BOOTSTRAP_EMAIL`
+/// with `passwordHash=null` and a one-time `activationTokenHash`; the
+/// platform operator opens `/admin/auth/activate?token=...` to choose a
+/// password and the token is then burned (idempotent re-runs are no-ops).
+model SuperAdmin {
+  id                  String    @id @default(cuid())
+  email               String    @unique
+  /// bcryptjs hash. Null until the activation flow consumes the token.
+  passwordHash        String?
+  /// SHA-256 of the one-time activation token. Plaintext is shown to the
+  /// operator once during bootstrap; only the hash is stored.
+  activationTokenHash String?   @unique
+  activationExpiresAt DateTime?
+  name                String?
+  isActive            Boolean   @default(true)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+}
+
+/// Browser session for a SuperAdmin. Mirrors the TenantSession shape but
+/// has no `tenantId` — every tenant operation requires an explicit tenantId
+/// parameter at the controller level (R6.5, R20.7).
+model SuperAdminSession {
+  id           String   @id @default(cuid())
+  superAdminId String
+  tokenHash    String   @unique
+  expiresAt    DateTime
+  ip           String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+  lastSeen     DateTime @default(now())
+
+  @@index([superAdminId])
+  @@index([expiresAt])
+}
+
+
+/// Singleton platform-level settings. Holds platform-billing credentials
+/// (the SaaS operator's own SSLCommerz store) and other per-deployment
+/// knobs the admin UI lets you edit at runtime — without an env restart.
+///
+/// Convention: the application enforces a single row by always reading /
+/// upserting `id = 'platform'`. Storing as a model (not a JSON column on
+/// some other table) keeps the read path indexable and the write path
+/// transactional.
+///
+/// `secrets` is a JSON column for credentials. It is intentionally generic
+/// so future gateways (AamarPay subscription, bKash subscription) can
+/// reuse the same surface without a schema change.
+model PlatformSettings {
+  id        String   @id @default("platform")
+  /// JSON blob keyed by gateway slug. Shape:
+  /// {
+  ///   sslcommerzSubscription: {
+  ///     storeId: string,
+  ///     storePassword: string,
+  ///     isSandbox: boolean
+  ///   }
+  /// }
+  secrets   Json
+  /// Last actor that updated this row (for audit). Format `super_admin:<id>` or `legacy-admin-key`.
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

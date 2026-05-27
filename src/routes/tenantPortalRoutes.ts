@@ -45,6 +45,14 @@ import {
   validateTiktok,
 } from "../controllers/tenantPortalController.js";
 import { learnPersonaFromUploads } from "../controllers/personaLearnController.js";
+import { getTenantCategorySchema } from "../controllers/tenantSchemaController.js";
+import { getAnalyticsOverview } from "../controllers/tenantAnalyticsController.js";
+import {
+  cancelMySubscription,
+  getMyBilling,
+  initiateRenewal,
+  listMyInvoices,
+} from "../controllers/tenantBillingController.js";
 import { testPathao, testSslcommerz, testTelegram, testSteadfast } from "../controllers/integrationTestController.js";
 import {
   deleteTrainingJsonCorpus,
@@ -93,6 +101,19 @@ const trainingJsonUpload = multer({
 tenantPortalRoutes.use(requireTenantApiKey);
 
 tenantPortalRoutes.get("/me", getMe);
+tenantPortalRoutes.get("/me/category-schema", getTenantCategorySchema);
+
+// Analytics — single aggregating endpoint for the /portal/analytics page.
+tenantPortalRoutes.get("/analytics/overview", getAnalyticsOverview);
+
+// Billing — tenant self-serve subscription view + initiate-renewal + cancel.
+// Mounted under /api/v1/billing/* via the parent /api/v1 namespace; the
+// SSLCommerz IPN webhook continues to live on /api/v1/billing/sslcommerz/webhook
+// in `billingRoutes.ts` and uses raw body for signature validation.
+tenantPortalRoutes.get("/billing/me", getMyBilling);
+tenantPortalRoutes.get("/billing/invoices", listMyInvoices);
+tenantPortalRoutes.post("/billing/initiate-renewal", initiateRenewal);
+tenantPortalRoutes.post("/billing/cancel", cancelMySubscription);
 tenantPortalRoutes.get("/orders", listOrders);
 tenantPortalRoutes.get("/orders/:orderId", getOrder);
 tenantPortalRoutes.get("/orders/:orderId/invoice", getOrderInvoice);

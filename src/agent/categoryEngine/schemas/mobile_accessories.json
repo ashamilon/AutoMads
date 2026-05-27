@@ -1,0 +1,94 @@
+{
+  "slug": "mobile_accessories",
+  "version": 1,
+  "attributes": [
+    {
+      "key": "compatibility",
+      "label": "Compatibility",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "brand",
+      "label": "Brand",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "variantAttributes": [
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "orderAttributes": [
+    {
+      "key": "model_compat",
+      "label": "Model Compatibility",
+      "type": "string",
+      "required": true,
+      "customerVisible": true
+    },
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "filterAttributes": [
+    {
+      "key": "brand",
+      "label": "Brand",
+      "type": "string",
+      "required": false,
+      "customerVisible": false
+    },
+    {
+      "key": "compatibility",
+      "label": "Compatibility",
+      "type": "string",
+      "required": false,
+      "customerVisible": false
+    }
+  ],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "compatibility_check",
+    "product_grid",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {
+    "intentHints": ["mobile_compat_inquiry", "mobile_brand_inquiry"],
+    "recommendationStrategy": "compatibility_first",
+    "requiresDeliveryEstimate": false,
+    "compatibilityCheckRequired": true
+  },
+  "promptFragments": [
+    "You sell mobile accessories. Always confirm the customer's exact phone model before recommending."
+  ],
+  "isBuiltIn": true,
+  "tenantId": null
+}

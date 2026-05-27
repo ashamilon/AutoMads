@@ -35,7 +35,40 @@ export const replyTools: ToolDef[] = [
     terminal: true,
     handler: async (rawArgs, ctx) => {
       const args = ReplyArgs.parse(rawArgs);
-      const safeText = sanitizeCustomerReply(args.text);
+      // Outbound short-circuit (Multi-Tenant Commerce OS task 3.3, R12.4 / R18.4).
+      //
+      // `runAgentTurn` already exits before the StateGraph runs when the
+      // subscription is non-operational, so this branch is a defense in
+      // depth — if a future caller bypasses the loop and invokes the
+      // reply tool directly with a non-operational reasoning context, we
+      // refuse to emit outbound text. The inbound is logged via the
+      // structured-log pipeline upstream; we simply DO NOT call
+      // `sendMessengerText` and surface a non-OK terminal result so the
+      // caller can record the refused turn without any customer-visible
+      // side-effect.
+      if (
+        ctx.reasoningContext &&
+        ctx.reasoningContext.subscription.isOperational === false
+      ) {
+        logger.warn(
+          {
+            event: "reply_short_circuit_subscription_not_operational",
+            tenantId: ctx.input.tenantId,
+            conversationId: ctx.input.conversationId,
+            subscriptionStatus:
+              ctx.reasoningContext.subscription.status,
+          },
+          "agent.reply refused: subscription not operational",
+        );
+        return {
+          ok: false,
+          error: "subscription_not_operational",
+          observation:
+            "Reply suppressed: tenant subscription is not operational; outbound disabled.",
+        };
+      }
+      const resolvedAddressStyle = ctx.reasoningContext?.audience?.address?.style;
+      const safeText = sanitizeCustomerReply(args.text, resolvedAddressStyle);
       try {
         await sendMessengerText({
           pageAccessToken: ctx.input.pageAccessToken,
@@ -65,8 +98,10 @@ export const replyTools: ToolDef[] = [
     terminal: true,
     handler: async (rawArgs, ctx) => {
       const args = EscalateArgs.parse(rawArgs);
+      const resolvedAddressStyleEsc = ctx.reasoningContext?.audience?.address?.style;
       const text = sanitizeCustomerReply(
         args.customer_text ?? "Ami akhon admin er sathe connect kore dichchi — kichu pore reply pabben 🙏",
+        resolvedAddressStyleEsc,
       );
       try {
         await sendMessengerText({

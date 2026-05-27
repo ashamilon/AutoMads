@@ -15,6 +15,9 @@ import { bkashRoutes } from "./routes/bkashRoutes.js";
 import { steadfastRoutes } from "./routes/steadfastRoutes.js";
 import { clientRoutes } from "./routes/clientRoutes.js";
 import { tenantPortalRoutes } from "./routes/tenantPortalRoutes.js";
+import { onboardingRoutes } from "./routes/onboardingRoutes.js";
+import { billingRoutes } from "./routes/billingRoutes.js";
+import { adminPanelRoutes } from "./routes/adminPanelRoutes.js";
 import { authAuthenticatedRoutes, authPublicRoutes } from "./routes/authRoutes.js";
 import { agentDebugRoutes } from "./routes/agentDebugRoutes.js";
 import { telegramRoutes } from "./routes/telegramRoutes.js";
@@ -107,6 +110,9 @@ export function createApp(): express.Application {
   app.use("/webhooks/client", clientRoutes);
   app.use("/api/v1/auth", authPublicRoutes);
   app.use("/api/v1/auth", authAuthenticatedRoutes);
+  app.use("/api/v1/billing", billingRoutes);
+  app.use("/api/v1/admin", adminPanelRoutes);
+  app.use("/api/v1/onboarding", onboardingRoutes);
   app.use("/api/v1", tenantPortalRoutes);
 
   app.use(errorHandler);

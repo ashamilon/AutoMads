@@ -38,6 +38,27 @@ type TenantContextValue = {
 
 const Ctx = createContext<TenantContextValue | null>(null);
 
+/**
+ * Set / clear the `onboarding_completed` probe cookie consumed by
+ * `client/src/middleware.ts`. Stores `1` when the wizard has finished and
+ * deletes the cookie otherwise so the middleware redirects unfinished
+ * tenants to `/onboarding`. We keep the cookie short-lived (1 day) and
+ * scoped to the current path so it's evicted automatically on logout
+ * even if `clearStoredAuth` doesn't run for some reason (e.g. tab crash).
+ *
+ * Note: the source of truth for onboarding completion stays on the API.
+ * This cookie is only a fast-path hint the edge middleware reads to
+ * avoid an extra cross-origin `/me` round-trip on every navigation.
+ */
+function syncOnboardingCookie(completedAt: string | null): void {
+  if (typeof document === "undefined") return;
+  if (completedAt) {
+    document.cookie = `onboarding_completed=1; Path=/; Max-Age=86400; SameSite=Lax`;
+  } else {
+    document.cookie = `onboarding_completed=; Path=/; Max-Age=0; SameSite=Lax`;
+  }
+}
+
 export function TenantProvider({ children }: { children: ReactNode }) {
   const [tenant, setTenant] = useState<TenantMe | null>(null);
   const [loading, setLoading] = useState(true);
@@ -53,6 +74,11 @@ export function TenantProvider({ children }: { children: ReactNode }) {
     try {
       const data = await apiFetch<TenantMe>("/api/v1/me");
       setTenant(data);
+      // Sync the onboarding-flag probe cookie used by `client/src/middleware.ts`
+      // to gate access to the portal until the wizard finishes. Setting it
+      // here keeps the source of truth on the API while letting the edge
+      // middleware avoid a cross-origin /me round-trip on every navigation.
+      syncOnboardingCookie(data.onboardingCompletedAt);
     } catch (e) {
       const status = e instanceof ApiError ? e.status : 0;
       /** Only drop credential when the server rejects credentials — not on network/500 */
@@ -98,6 +124,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       }
       const me = await apiFetch<TenantMe>("/api/v1/me");
       setTenant(me);
+      syncOnboardingCookie(me.onboardingCompletedAt);
     } catch (e) {
       clearStoredAuth();
       setTenant(null);
@@ -123,6 +150,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       /* ignore */
     }
     clearStoredAuth();
+    syncOnboardingCookie(null);
     setTenant(null);
     setAuthError(null);
   }, []);

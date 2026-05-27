@@ -1,0 +1,110 @@
+{
+  "slug": "restaurant",
+  "version": 1,
+  "attributes": [
+    {
+      "key": "food_category",
+      "label": "Food Category",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["appetizer", "main", "dessert", "beverage", "snack"]
+    },
+    {
+      "key": "prep_time",
+      "label": "Prep Time",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "min"
+    },
+    {
+      "key": "portion_size",
+      "label": "Portion Size",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["small", "regular", "large", "family"]
+    }
+  ],
+  "variantAttributes": [
+    {
+      "key": "portion_size",
+      "label": "Portion Size",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["small", "regular", "large", "family"]
+    }
+  ],
+  "orderAttributes": [
+    {
+      "key": "spice_level",
+      "label": "Spice Level",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["mild", "medium", "hot", "extra_hot"]
+    },
+    {
+      "key": "toppings",
+      "label": "Toppings",
+      "type": "multi_enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["cheese", "onion", "egg", "chicken", "beef", "vegetables"]
+    },
+    {
+      "key": "delivery_notes",
+      "label": "Delivery Notes",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "filterAttributes": [
+    {
+      "key": "food_category",
+      "label": "Food Category",
+      "type": "enum",
+      "required": false,
+      "customerVisible": false,
+      "enumValues": ["appetizer", "main", "dessert", "beverage", "snack"]
+    },
+    {
+      "key": "prep_time",
+      "label": "Prep Time",
+      "type": "number",
+      "required": false,
+      "customerVisible": false,
+      "unit": "min"
+    }
+  ],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "menu_manager",
+    "delivery_zones",
+    "food_variants",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {
+    "intentHints": ["restaurant_menu_inquiry", "restaurant_spice_level_inquiry", "restaurant_delivery_inquiry"],
+    "recommendationStrategy": "category_first",
+    "requiresDeliveryEstimate": true,
+    "compatibilityCheckRequired": false
+  },
+  "promptFragments": [
+    "You serve food orders. Confirm spice level, toppings, and delivery notes. Always provide a delivery time estimate."
+  ],
+  "isBuiltIn": true,
+  "tenantId": null
+}

@@ -28,6 +28,25 @@ export type PersonaIdentity = {
 };
 
 /**
+ * Per-turn audience hints injected into the system prompt so the agent
+ * addresses the customer with the right style and biases recommendations
+ * toward the shop's primary audience.
+ *
+ * Both fields are optional — when absent the prompt simply omits the
+ * audience block. The shape mirrors the resolved data on
+ * `ReasoningContext.audience` so callers can pass the resolved audience
+ * straight through.
+ */
+export type AudienceHint = {
+  /** Capitalised customer-facing form, e.g. "Vaiya", "Apu", "Sir". */
+  addressCanonical: string;
+  /** Resolved style key for the reply filter to match against. */
+  addressStyle: string;
+  /** Tenant's primary audience tags, e.g. "women", "men", "boys + girls". */
+  targetAudienceLabel?: string;
+};
+
+/**
  * Resolve the agent's identity from tenant settings. Pure — no DB access.
  *
  * Inputs are intentionally loose so callers can pass the parsed `botPersona`
@@ -49,13 +68,63 @@ export function resolvePersonaIdentity(
  * Build the agent's system prompt with the tenant's persona injected. Returns
  * a complete prompt string that the router can pass straight to Ollama.
  * Pure — given the same identity it returns the same string.
+ *
+ * `audience` is optional. When supplied, an Audience block is appended
+ * after the persona section so the agent knows how to address the
+ * customer (Vaiya / Apu / Sir / Madam / Bondhu) and which audience the
+ * shop primarily serves. When absent, the prompt has no audience block
+ * and the agent uses its built-in defaults.
  */
-export function buildAgentSystemPrompt(identity: PersonaIdentity): string {
-  return AGENT_SYSTEM_PROMPT_TEMPLATE.replace(/\{\{personaName\}\}/g, identity.name).replace(
-    /\{\{personaRole\}\}/g,
-    identity.role,
-  );
+export function buildAgentSystemPrompt(
+  identity: PersonaIdentity,
+  audience?: AudienceHint,
+): string {
+  const base = AGENT_SYSTEM_PROMPT_TEMPLATE.replace(
+    /\{\{personaName\}\}/g,
+    identity.name,
+  ).replace(/\{\{personaRole\}\}/g, identity.role);
+  if (!audience) return base;
+  return base + "\n\n" + buildAudienceFragment(audience);
 }
+
+/**
+ * Construct the customer-facing audience fragment appended after the
+ * core system prompt. Two lines:
+ *
+ *   1. Address rule — the agent MUST refer to the customer with this
+ *      style. The model occasionally drifts to "Sir" when told only
+ *      "use Vaiya"; we explicitly forbid the alternatives so the
+ *      reply-filter has fewer cases to clean up.
+ *   2. Optional audience bias — when the tenant declared a primary
+ *      audience, surface it so recommendations land in the right
+ *      register (e.g. an undergarments shop with target = women won't
+ *      proactively pitch men's products).
+ */
+function buildAudienceFragment(audience: AudienceHint): string {
+  const forbidden = ADDRESS_ALTERNATIVES_BY_STYLE[audience.addressStyle] ??
+    ["Vaiya", "Apu", "Sir", "Madam", "Bondhu"].filter(
+      (a) => a !== audience.addressCanonical,
+    );
+  const bias = audience.targetAudienceLabel
+    ? `This shop primarily serves ${audience.targetAudienceLabel}. Bias product recommendations to that audience unless the customer explicitly says otherwise.`
+    : "";
+  return [
+    "AUDIENCE",
+    `- Address the customer as "${audience.addressCanonical}" — use this in greetings and when getting their attention. Do NOT use ${forbidden.join(", ")} this turn.`,
+    bias,
+  ]
+    .filter((s) => s.trim().length > 0)
+    .join("\n");
+}
+
+/** Pre-computed forbidden-alternatives table for the audience fragment. */
+const ADDRESS_ALTERNATIVES_BY_STYLE: Record<string, ReadonlyArray<string>> = {
+  bhaiya: ["Apu", "Sir", "Madam", "Bondhu"],
+  apu: ["Vaiya", "Sir", "Madam", "Bondhu"],
+  sir: ["Vaiya", "Apu", "Madam", "Bondhu"],
+  madam: ["Vaiya", "Apu", "Sir", "Bondhu"],
+  bondhu: ["Vaiya", "Apu", "Sir", "Madam"],
+};
 
 const AGENT_SYSTEM_PROMPT_TEMPLATE = `You are {{personaName}}, {{personaRole}} for a Bangladeshi Messenger commerce shop.
 You operate in a TOOL-USE LOOP. On each step, choose EXACTLY ONE tool to advance the conversation.

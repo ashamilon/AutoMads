@@ -110,9 +110,11 @@ function stepToRow(args: {
 export type AgentOverrideKind =
   | "anti_hallucination"
   | "anti_loop"
+  | "anti_loop_nudge"
   | "banned_word"
   | "tone_rewrite"
   | "capability_confession"
+  | "address_style"
   | "fsm_block";
 
 /**

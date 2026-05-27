@@ -1,0 +1,147 @@
+{
+  "slug": "jersey",
+  "version": 1,
+  "attributes": [
+    {
+      "key": "chest",
+      "label": "Chest",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "cm"
+    },
+    {
+      "key": "length",
+      "label": "Length",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "cm"
+    },
+    {
+      "key": "sleeve",
+      "label": "Sleeve",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["full", "half"]
+    },
+    {
+      "key": "version",
+      "label": "Version",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["fan", "player"]
+    },
+    {
+      "key": "team",
+      "label": "Team",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "season",
+      "label": "Season",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "variantAttributes": [
+    {
+      "key": "size",
+      "label": "Size",
+      "type": "enum",
+      "required": true,
+      "customerVisible": true,
+      "enumValues": ["S", "M", "L", "XL", "XXL"]
+    }
+  ],
+  "orderAttributes": [
+    {
+      "key": "size",
+      "label": "Size",
+      "type": "enum",
+      "required": true,
+      "customerVisible": true,
+      "enumValues": ["S", "M", "L", "XL", "XXL"]
+    },
+    {
+      "key": "version",
+      "label": "Version",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["fan", "player"]
+    },
+    {
+      "key": "name_print",
+      "label": "Name Print",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "number_print",
+      "label": "Number Print",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "filterAttributes": [
+    {
+      "key": "team",
+      "label": "Team",
+      "type": "string",
+      "required": false,
+      "customerVisible": false
+    },
+    {
+      "key": "season",
+      "label": "Season",
+      "type": "string",
+      "required": false,
+      "customerVisible": false
+    },
+    {
+      "key": "version",
+      "label": "Version",
+      "type": "enum",
+      "required": false,
+      "customerVisible": false,
+      "enumValues": ["fan", "player"]
+    }
+  ],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "size_chart",
+    "team_filter",
+    "player_filter",
+    "product_grid",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {
+    "intentHints": ["jersey_team_inquiry", "jersey_size_inquiry", "jersey_print_request"],
+    "recommendationStrategy": "team_first",
+    "requiresDeliveryEstimate": false,
+    "compatibilityCheckRequired": false
+  },
+  "promptFragments": [
+    "You sell football and cricket jerseys. Common attributes: team, season, fan vs player version.",
+    "When the customer asks for a size, confirm chest and length in cm before recommending."
+  ],
+  "isBuiltIn": true,
+  "tenantId": null
+}

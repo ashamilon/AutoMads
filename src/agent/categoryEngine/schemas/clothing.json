@@ -1,0 +1,144 @@
+{
+  "slug": "clothing",
+  "version": 1,
+  "attributes": [
+    {
+      "key": "chest",
+      "label": "Chest",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "cm"
+    },
+    {
+      "key": "waist",
+      "label": "Waist",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "cm"
+    },
+    {
+      "key": "length",
+      "label": "Length",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "cm"
+    },
+    {
+      "key": "fabric",
+      "label": "Fabric",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "fit",
+      "label": "Fit",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["slim", "regular", "loose"]
+    },
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "variantAttributes": [
+    {
+      "key": "size",
+      "label": "Size",
+      "type": "enum",
+      "required": true,
+      "customerVisible": true,
+      "enumValues": ["XS", "S", "M", "L", "XL", "XXL"]
+    },
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "orderAttributes": [
+    {
+      "key": "size",
+      "label": "Size",
+      "type": "enum",
+      "required": true,
+      "customerVisible": true,
+      "enumValues": ["XS", "S", "M", "L", "XL", "XXL"]
+    },
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "fit",
+      "label": "Fit",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["slim", "regular", "loose"]
+    }
+  ],
+  "filterAttributes": [
+    {
+      "key": "fabric",
+      "label": "Fabric",
+      "type": "string",
+      "required": false,
+      "customerVisible": false
+    },
+    {
+      "key": "fit",
+      "label": "Fit",
+      "type": "enum",
+      "required": false,
+      "customerVisible": false,
+      "enumValues": ["slim", "regular", "loose"]
+    },
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": false
+    }
+  ],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "size_chart",
+    "product_grid",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {
+    "intentHints": ["clothing_size_inquiry", "clothing_fit_inquiry"],
+    "recommendationStrategy": "fit_first",
+    "requiresDeliveryEstimate": false,
+    "compatibilityCheckRequired": false
+  },
+  "promptFragments": [
+    "You sell apparel. Confirm size, fit, and color before recommending."
+  ],
+  "isBuiltIn": true,
+  "tenantId": null
+}

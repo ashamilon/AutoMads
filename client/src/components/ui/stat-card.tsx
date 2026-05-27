@@ -13,6 +13,13 @@ const toneMap: Record<Tone, { glow: string; icon: string; ring: string }> = {
   sky: { glow: "from-sky-500/25", icon: "text-sky-300", ring: "ring-sky-400/20" },
 };
 
+/**
+ * KPI card with a tinted glow corner.
+ *
+ * Padding and value font-size shrink on mobile so long numeric values like
+ * "৳1,48,920" fit a 360px column. Long currency values get `break-words` so
+ * if they ever do overflow the card grows vertically rather than horizontally.
+ */
 export function StatCard({
   label,
   value,
@@ -32,7 +39,7 @@ export function StatCard({
   return (
     <div
       className={cn(
-        "group relative overflow-hidden rounded-2xl border border-white/[0.07] bg-gradient-to-br p-5 shadow-card transition hover:border-white/[0.13]",
+        "group relative overflow-hidden rounded-2xl border border-white/[0.07] bg-gradient-to-br p-4 shadow-card transition hover:border-white/[0.13] sm:p-5",
         t.glow,
         "to-transparent",
         className,
@@ -41,19 +48,19 @@ export function StatCard({
       {Icon && (
         <div
           className={cn(
-            "absolute right-4 top-4 grid h-10 w-10 place-items-center rounded-xl bg-white/[0.04] ring-1",
+            "absolute right-3 top-3 grid h-9 w-9 place-items-center rounded-xl bg-white/[0.04] ring-1 sm:right-4 sm:top-4 sm:h-10 sm:w-10",
             t.icon,
             t.ring,
           )}
         >
-          <Icon className="h-5 w-5" />
+          <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
         </div>
       )}
-      <p className="label-caps">{label}</p>
-      <p className="mt-2 font-display text-[2rem] font-bold leading-none tabular-figures tracking-display text-white">
+      <p className="label-caps pr-12">{label}</p>
+      <p className="mt-2 break-words font-display text-[1.6rem] font-bold leading-none tabular-figures tracking-display text-white sm:text-[2rem]">
         {value}
       </p>
-      {hint && <p className="mt-2 text-xs font-medium text-slate-500">{hint}</p>}
+      {hint && <p className="mt-2 text-[11px] font-medium text-slate-500 sm:text-xs">{hint}</p>}
     </div>
   );
 }

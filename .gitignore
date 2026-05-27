@@ -21,3 +21,7 @@ all_messages/
 .tmp/
 # Generated PDF invoices (contain real customer data)
 public/invoices/
+# Per-tenant uploaded media (logos, brand images). These get written at
+# runtime; production deploys should host them in object storage. Keeping
+# them out of git so customer media doesn't end up in commits.
+public/tenant-assets/

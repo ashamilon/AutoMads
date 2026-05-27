@@ -122,7 +122,10 @@ const REPLACEMENTS: Replacement[] = [
   },
 ];
 
-export function sanitizeCustomerReply(text: string): string {
+export function sanitizeCustomerReply(
+  text: string,
+  resolvedAddressStyle?: string,
+): string {
   if (!text) return text;
   let out = text;
   for (const { pattern, replace } of REPLACEMENTS) {
@@ -133,6 +136,14 @@ export function sanitizeCustomerReply(text: string): string {
   // page integration where there genuinely is no history yet. We rewrite to a
   // warm active prompt instead. Whole-sentence replace, conservative match.
   out = rewriteCapabilityConfessions(out);
+  // Address-style polish — runs after the banned-word + capability passes
+  // so the model can't slip a stale "Vaiya"/"Apu" past us by hiding it
+  // inside one of those rewrites. When `resolvedAddressStyle` is omitted
+  // (legacy callers / tests) the pass is a no-op.
+  if (resolvedAddressStyle) {
+    const swept = applyAddressStylePass(out, resolvedAddressStyle);
+    out = swept.text;
+  }
   // Tidy up any double spaces the substitutions might create.
   return out.replace(/[ \t]{2,}/g, " ").replace(/ +([,.!?])/g, "$1");
 }
@@ -197,7 +208,8 @@ export type FilterOverride =
   | { kind: "tone_rewrite"; from: string; to: string }
   | { kind: "capability_confession"; phrase: string }
   | { kind: "anti_hallucination"; attribute: string; value: string }
-  | { kind: "confirmation_block"; phrase: string };
+  | { kind: "confirmation_block"; phrase: string }
+  | { kind: "address_style"; from: string; to: string };
 
 export type FilterReplyResult = { text: string; overrides: FilterOverride[] };
 
@@ -377,11 +389,73 @@ function applyConfirmationBlockPass(
 }
 
 /**
- * Run all three passes in order and aggregate the overrides. The passes are
+ * Pass 4 — address style. When a resolved address style is supplied,
+ * sweep the reply for any of the *other* address aliases the model may
+ * have leaked (Vaiya in an Apu conversation, Sir in a Vaiya conversation,
+ * etc.) and rewrite them to the canonical form. We only rewrite at
+ * sentence start / after punctuation, where addresses are most likely
+ * to appear — bare mid-sentence "vai" inside a longer Banglish word
+ * would be a false positive.
+ *
+ * The rule fires at most once per offending alias per reply so we
+ * don't double-write.
+ *
+ * Maps to: R5.1, R7.1, R18.7.
+ */
+function applyAddressStylePass(
+  text: string,
+  resolvedStyle: string | undefined,
+): FilterReplyResult {
+  if (!resolvedStyle || !text) return { text, overrides: [] };
+  const styleToCanonical: Record<string, string> = {
+    bhaiya: "Vaiya",
+    apu: "Apu",
+    sir: "Sir",
+    madam: "Madam",
+    bondhu: "Bondhu",
+  };
+  const canonical = styleToCanonical[resolvedStyle];
+  if (!canonical) return { text, overrides: [] };
+  // Aliases that are NOT the resolved style (case-insensitive).
+  const otherAliases: Record<string, ReadonlyArray<string>> = {
+    bhaiya: ["vai", "vaiya", "bhai", "bhaiya"],
+    apu: ["apu", "apa", "apuni", "didi"],
+    sir: ["sir", "boss"],
+    madam: ["madam", "ma'am", "maam"],
+    bondhu: ["bondhu", "friend", "dost"],
+  };
+  const overrides: FilterOverride[] = [];
+  let working = text;
+  for (const [otherStyle, aliases] of Object.entries(otherAliases)) {
+    if (otherStyle === resolvedStyle) continue;
+    for (const alias of aliases) {
+      // Only rewrite when the alias appears at the start of a sentence
+      // (or at start-of-text), optionally followed by a comma. This is
+      // exactly where the model places addresses ("Vaiya, ei ta…") and
+      // avoids false-positive matches on words like "apartment".
+      const rx = new RegExp(`(^|[.!?]\\s+)(${escapeRegExp(alias)})(\\b|,)`, "gi");
+      let didSwap = false;
+      working = working.replace(rx, (_match, prefix: string, _aliasMatch: string, suffix: string) => {
+        didSwap = true;
+        return `${prefix}${canonical}${suffix}`;
+      });
+      if (didSwap) {
+        overrides.push({ kind: "address_style", from: alias, to: canonical });
+      }
+    }
+  }
+  return { text: working, overrides };
+}
+
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Run all four passes in order and aggregate the overrides. The passes are
  * intentionally sequential: pass 1 may rewrite a banned word that pass 2 then
- * scans, and pass 3's wholesale rewrite (when triggered) supersedes any text
- * still being processed — but the override rows from earlier passes are kept
- * for the audit trail.
+ * scans, pass 3's wholesale rewrite (when triggered) supersedes any text
+ * still being processed, and pass 4 polishes addresses on the final surface.
  *
  * Inputs:
  *   • `text` — the LLM-proposed customer-facing reply.
@@ -391,11 +465,15 @@ function applyConfirmationBlockPass(
  *   • `traceSteps` — the per-step trace captured this turn. Only `tool` and
  *     `ok` are read; `data` is accepted for forward compat (e.g. checking the
  *     persisted order id later).
+ *   • `resolvedAddressStyle` — the style the agent should use to address the
+ *     customer this turn (`bhaiya|apu|sir|madam|bondhu`). When supplied, pass 4
+ *     rewrites stale addresses the model may have leaked.
  */
 export function filterReply(
   text: string,
   lastVerifiedToolResults: ReadonlyArray<VerifiedToolResult>,
   traceSteps: ReadonlyArray<FilterTraceStep>,
+  resolvedAddressStyle?: string,
 ): FilterReplyResult {
   if (!text) return { text, overrides: [] };
 
@@ -416,6 +494,12 @@ export function filterReply(
   const confirm = applyConfirmationBlockPass(working, traceSteps);
   working = confirm.text;
   overrides.push(...confirm.overrides);
+
+  // Pass 4 — address style. Runs LAST so it operates on the final text
+  // surface and never gets overwritten by pass 2/3 substitutions.
+  const address = applyAddressStylePass(working, resolvedAddressStyle);
+  working = address.text;
+  overrides.push(...address.overrides);
 
   return { text: working, overrides };
 }

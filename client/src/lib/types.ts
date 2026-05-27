@@ -6,6 +6,8 @@ export type TenantMe = {
   facebookPageId: string | null;
   hasFacebookPageAccessToken: boolean;
   settings: Record<string, unknown> | null;
+  onboardingCompletedAt: string | null;
+  businessCategory: string | null;
   integration: {
     type: string;
     config: Record<string, unknown>;

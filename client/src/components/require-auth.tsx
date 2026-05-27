@@ -18,6 +18,21 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
     }
   }, [loading, tenant, router]);
 
+  // Onboarding gate (Multi-Tenant Commerce OS, R1.1).
+  //
+  // The Next edge middleware handles same-origin deployments, but in dev
+  // the API + dashboard run on different ports (4000 vs 3000), so the
+  // `tenant_session` cookie never reaches the dashboard origin and the
+  // middleware always falls through. This client-side guard is the
+  // authoritative redirect: as soon as `/me` reports `onboardingCompletedAt === null`
+  // for an authenticated tenant, send them to `/onboarding`.
+  useEffect(() => {
+    if (!tenant) return;
+    if (tenant.onboardingCompletedAt === null) {
+      router.replace("/onboarding");
+    }
+  }, [tenant, router]);
+
   if (loading && !tenant && !authError) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-mesh-dark">
@@ -59,6 +74,19 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
       );
     }
     return null;
+  }
+
+  // While the redirect to /onboarding is being scheduled (the useEffect
+  // above runs after the first paint), avoid flashing the portal shell.
+  if (tenant.onboardingCompletedAt === null) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-mesh-dark">
+        <div className="flex flex-col items-center gap-4 rounded-2xl border border-white/10 bg-white/5 px-10 py-12">
+          <Loader2 className="h-10 w-10 animate-spin text-accent-bright" />
+          <p className="text-sm text-slate-400">Setting up your workspace…</p>
+        </div>
+      </div>
+    );
   }
 
   return <>{children}</>;

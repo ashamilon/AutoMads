@@ -1,0 +1,99 @@
+{
+  "slug": "pet_shop",
+  "version": 1,
+  "attributes": [
+    {
+      "key": "pet_type",
+      "label": "Pet Type",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["dog", "cat", "bird", "fish", "rabbit", "other"]
+    },
+    {
+      "key": "breed",
+      "label": "Breed",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "age_range",
+      "label": "Age Range",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["puppy_kitten", "young", "adult", "senior"]
+    },
+    {
+      "key": "size_kg",
+      "label": "Size",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "kg"
+    }
+  ],
+  "variantAttributes": [
+    {
+      "key": "size_kg",
+      "label": "Size",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "kg"
+    }
+  ],
+  "orderAttributes": [
+    {
+      "key": "delivery_notes",
+      "label": "Delivery Notes",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "filterAttributes": [
+    {
+      "key": "pet_type",
+      "label": "Pet Type",
+      "type": "enum",
+      "required": false,
+      "customerVisible": false,
+      "enumValues": ["dog", "cat", "bird", "fish", "rabbit", "other"]
+    },
+    {
+      "key": "age_range",
+      "label": "Age Range",
+      "type": "enum",
+      "required": false,
+      "customerVisible": false,
+      "enumValues": ["puppy_kitten", "young", "adult", "senior"]
+    }
+  ],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "product_grid",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {
+    "intentHints": ["pet_type_inquiry", "pet_food_inquiry"],
+    "recommendationStrategy": "pet_type_first",
+    "requiresDeliveryEstimate": false,
+    "compatibilityCheckRequired": false
+  },
+  "promptFragments": [
+    "You sell pet products. Confirm pet type, age, and size before recommending."
+  ],
+  "isBuiltIn": true,
+  "tenantId": null
+}

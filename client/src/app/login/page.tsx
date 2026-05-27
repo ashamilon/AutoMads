@@ -2,6 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { WhatsAppCard } from "@/components/ui/whatsapp-cta";
 import { useTenant } from "@/context/tenant-context";
 import { getBrandLogoUrl, getBrandNameUrl } from "@/lib/branding";
 import { motion } from "framer-motion";
@@ -173,6 +174,15 @@ export default function LoginPage() {
             </Link>
           </p>
         </Card>
+
+        {/* WhatsApp escape hatch — for first-time visitors who don't have credentials yet. */}
+        <div className="mt-5">
+          <WhatsAppCard
+            title="Don't have an activation link yet?"
+            description="Message us on WhatsApp and we'll send you a setup link. Once you receive it, come back here to sign in."
+            prefill="Hi! I'd like to sign up for the AI Commerce OS platform. Can you send me a setup / activation link?"
+          />
+        </div>
       </motion.div>
     </div>
   );

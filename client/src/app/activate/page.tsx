@@ -2,6 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { WhatsAppCard } from "@/components/ui/whatsapp-cta";
 import { ApiError, apiFetch, setStoredSessionToken } from "@/lib/api";
 import { getBrandLogoUrl, getBrandNameUrl } from "@/lib/branding";
 import { motion } from "framer-motion";
@@ -190,6 +191,15 @@ function ActivateInner() {
             </Link>
           </p>
         </Card>
+
+        {/* Recovery path: WhatsApp the operator if the link is bad / expired. */}
+        <div className="mt-5">
+          <WhatsAppCard
+            title="Activation link expired or missing?"
+            description="WhatsApp us and we'll re-send a fresh activation link within minutes."
+            prefill="Hi! My activation link isn't working — could you send me a new one please?"
+          />
+        </div>
       </motion.div>
     </div>
   );

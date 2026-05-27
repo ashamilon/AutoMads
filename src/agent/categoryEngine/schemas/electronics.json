@@ -1,0 +1,120 @@
+{
+  "slug": "electronics",
+  "version": 1,
+  "attributes": [
+    {
+      "key": "model",
+      "label": "Model",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "brand",
+      "label": "Brand",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "specs",
+      "label": "Specs",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "warranty_months",
+      "label": "Warranty",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "months"
+    }
+  ],
+  "variantAttributes": [
+    {
+      "key": "model",
+      "label": "Model",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "orderAttributes": [
+    {
+      "key": "model",
+      "label": "Model",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "warranty_choice",
+      "label": "Warranty Choice",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["standard", "extended"]
+    },
+    {
+      "key": "accessories",
+      "label": "Accessories",
+      "type": "multi_enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["charger", "case", "screen_protector", "headphones", "cable"]
+    }
+  ],
+  "filterAttributes": [
+    {
+      "key": "brand",
+      "label": "Brand",
+      "type": "string",
+      "required": false,
+      "customerVisible": false
+    },
+    {
+      "key": "warranty_months",
+      "label": "Warranty",
+      "type": "number",
+      "required": false,
+      "customerVisible": false,
+      "unit": "months"
+    }
+  ],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "specs_panel",
+    "compatibility_check",
+    "product_grid",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {
+    "intentHints": ["electronics_specs_inquiry", "electronics_compatibility_inquiry", "electronics_warranty_inquiry"],
+    "recommendationStrategy": "specs_first",
+    "requiresDeliveryEstimate": false,
+    "compatibilityCheckRequired": true
+  },
+  "promptFragments": [
+    "You sell electronics. Confirm model, brand, and required specs. Run a compatibility check before checkout when applicable."
+  ],
+  "isBuiltIn": true,
+  "tenantId": null
+}

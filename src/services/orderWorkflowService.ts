@@ -403,7 +403,10 @@ function detectMultipleCatalogOptionSelections(text: string, max: number): numbe
   return Array.from(indices).sort((a, b) => a - b);
 }
 
-function deriveCollectionName(matches: Array<{ name: string }>): { name: string; flag: string } {
+function deriveCollectionName(
+  matches: Array<{ name: string }>,
+  businessCategory?: string | null,
+): { name: string; flag: string } {
   const KEYWORDS = [
     "Argentina",
     "Brazil",
@@ -446,23 +449,31 @@ function deriveCollectionName(matches: Array<{ name: string }>): { name: string;
   const blob = matches.map((m) => m.name).join(" ").toLowerCase();
   for (const kw of KEYWORDS) {
     if (blob.includes(kw.toLowerCase())) {
-      return { name: kw, flag: pickTeamEmoji(kw) };
+      return { name: kw, flag: pickTeamEmoji(kw, undefined, businessCategory) };
     }
   }
-  return { name: "Jersey", flag: matches[0] ? pickTeamEmoji(matches[0].name) : "⚽" };
+  // For non-jersey shops a "Jersey" collection name + ⚽ flag would be
+  // bewildering. Fall through to the matched product's name with no
+  // category-themed emoji (or themed emoji from `pickTeamEmoji`).
+  const cat = (businessCategory ?? "").trim().toLowerCase();
+  if (cat && cat !== "jersey") {
+    const first = matches[0]?.name ?? "Products";
+    return { name: first, flag: pickTeamEmoji(first, undefined, businessCategory) };
+  }
+  return { name: "Jersey", flag: matches[0] ? pickTeamEmoji(matches[0].name, undefined, businessCategory) : "⚽" };
 }
 
 function buildCatalogOptionsReply(
   matches: Array<{ name: string; price?: string }>,
-  opts: { collectionName?: string; flag?: string } = {},
+  opts: { collectionName?: string; flag?: string; businessCategory?: string | null } = {},
 ): string {
   if (matches.length === 0) return "Ekhon kono matching product nai.";
   const trimmed = matches.slice(0, MAX_CATALOG_OPTION_LIST);
-  const derived = deriveCollectionName(trimmed);
+  const derived = deriveCollectionName(trimmed, opts.businessCategory);
   const collection = opts.collectionName?.trim() || derived.name;
   const flag = opts.flag?.trim() || derived.flag;
 
-  const headLine = `${flag} ${collection} Collection Available`;
+  const headLine = flag ? `${flag} ${collection} Collection Available` : `${collection} Available`;
   const itemLines = trimmed
     .map((m, i) => {
       const emoji = NUMBER_EMOJI[i] ?? `${i + 1}.`;
@@ -765,10 +776,11 @@ async function sendMultiPhotoCatalogMatchReply(args: {
   within24hWindow: boolean;
   conversationId: string;
   tenantSlug: string;
+  businessCategory?: string | null;
 }): Promise<void> {
-  const { matches, settings, pageAccessToken, psid, within24hWindow, conversationId, tenantSlug } = args;
+  const { matches, settings, pageAccessToken, psid, within24hWindow, conversationId, tenantSlug, businessCategory } = args;
   const text = matches
-    .map((m) => buildDeterministicCatalogReply(m.row, { addOns: settings.addOns }))
+    .map((m) => buildDeterministicCatalogReply(m.row, { addOns: settings.addOns, businessCategory: businessCategory ?? null }))
     .join("\n\n");
   await sendMessengerText({ pageAccessToken, psid, text, within24hWindow });
   await logAssistantTurn(conversationId, text);
@@ -1710,8 +1722,9 @@ function buildBrowseFirstCatalogReply(
   row: ProductMapping,
   settings: ReturnType<typeof parseTenantSettings>,
   _addonSnippet: string,
+  businessCategory?: string | null,
 ): string {
-  return buildDeterministicCatalogReply(row, { addOns: settings.addOns });
+  return buildDeterministicCatalogReply(row, { addOns: settings.addOns, businessCategory: businessCategory ?? null });
 }
 
 function buildCartSummaryText(
@@ -2837,6 +2850,66 @@ function normalizeOrderItems(structured: StructuredOrder): NormalizedOrderItem[]
   return [{ product: single, size: String(structured.size ?? "").trim() || undefined, quantity }];
 }
 
+/**
+ * `skuHasVariants` mirror for the legacy path: looks at the catalog meta
+ * blob and returns true when the row declares per-size stock or a non-empty
+ * `variants[]` list. Same predicate as `agent/tools/missingSlots.ts` so the
+ * legacy switchboard and the agent loop agree on which products require a
+ * size at confirm time.
+ */
+function productMetaHasVariants(meta: Record<string, unknown> | null | undefined): boolean {
+  if (!meta) return false;
+  for (const key of ["sizeStocks", "size_stocks", "stockBySize", "stock_by_size"]) {
+    const map = meta[key];
+    if (
+      map &&
+      typeof map === "object" &&
+      !Array.isArray(map) &&
+      Object.keys(map as Record<string, unknown>).length > 0
+    ) {
+      return true;
+    }
+  }
+  const variants = meta["variants"];
+  if (Array.isArray(variants) && variants.length > 0) return true;
+  return false;
+}
+
+/**
+ * Look up a tenant's catalog by product label / sku and return the
+ * metadata blob. The legacy switchboard's `NormalizedOrderItem` carries
+ * the customer-facing product NAME (not the SKU) so we try both — exact
+ * SKU first, then a label-based search. Returns `null` when no row
+ * matches; callers should treat that as "size not required" so a partial
+ * catalog can never block the order.
+ */
+async function resolveProductMetaByName(
+  tenantId: string,
+  productOrSku: string,
+): Promise<Record<string, unknown> | null> {
+  const v = productOrSku.trim();
+  if (!v) return null;
+  const bySku = await prisma.productMapping
+    .findUnique({
+      where: { tenantId_clientSku: { tenantId, clientSku: v } },
+      select: { metadata: true },
+    })
+    .catch(() => null);
+  if (bySku?.metadata && typeof bySku.metadata === "object" && !Array.isArray(bySku.metadata)) {
+    return bySku.metadata as Record<string, unknown>;
+  }
+  const byLabel = await prisma.productMapping
+    .findFirst({
+      where: { tenantId, facebookLabel: { equals: v, mode: "insensitive" } },
+      select: { metadata: true },
+    })
+    .catch(() => null);
+  if (byLabel?.metadata && typeof byLabel.metadata === "object" && !Array.isArray(byLabel.metadata)) {
+    return byLabel.metadata as Record<string, unknown>;
+  }
+  return null;
+}
+
 async function resolveCatalogUnitPriceForProductName(tenantId: string, productName: string): Promise<number | null> {
   const direct = productName.trim();
   if (!direct) return null;
@@ -3135,12 +3208,27 @@ export async function handleInboundMessengerMessage(params: {
     where: { id: params.tenantId },
     include: { integration: true },
   });
-  const effectivePageToken = params.pageAccessTokenOverride ?? tenant?.facebookPageAccessToken;
-  if (!tenant?.isActive || !effectivePageToken) {
-    logger.warn({ tenantId: params.tenantId }, "Tenant inactive or missing page token");
+  if (!tenant?.isActive) {
+    logger.warn({ tenantId: params.tenantId }, "Tenant inactive — skipping inbound");
     return;
   }
-  // Patch the tenant object so all downstream helpers use the correct page token
+  // For real Messenger traffic the page token is mandatory (we have to reply via Graph).
+  // For sandbox traffic (SIM_* PSIDs from the portal /chat/simulate endpoint) we never
+  // call Graph — `sendMessengerText` short-circuits on `isSimulatorPsid` — so a missing
+  // token must NOT block the agent. Otherwise newly onboarded tenants (who haven't
+  // connected a real FB page yet) get a silent no-reply when they try the sandbox.
+  const isSandboxPsid = isSimulatorPsid(params.psid);
+  const effectivePageToken =
+    params.pageAccessTokenOverride ?? tenant.facebookPageAccessToken ?? "";
+  if (!effectivePageToken && !isSandboxPsid) {
+    logger.warn(
+      { tenantId: params.tenantId },
+      "Tenant missing facebookPageAccessToken — cannot reply to real Messenger traffic. Connect a Facebook page in Integration settings.",
+    );
+    return;
+  }
+  // Patch the tenant object so all downstream helpers use the correct page token.
+  // (Empty string is fine for sandbox — Graph helpers gate on `isSimulatorPsid` first.)
   (tenant as { facebookPageAccessToken: string }).facebookPageAccessToken = effectivePageToken;
 
   const agentEnabled = await isAgentEnabledForTenant(params.tenantId);
@@ -3355,7 +3443,7 @@ export async function handleInboundMessengerMessage(params: {
           return;
         }
         const addonSnippetReply = buildTenantAddonSnippet(settings.addOns);
-        const browseReply = buildBrowseFirstCatalogReply(repliedRow, settings, addonSnippetReply);
+        const browseReply = buildBrowseFirstCatalogReply(repliedRow, settings, addonSnippetReply, tenant.businessCategory);
         const assets = extractCatalogAssets(repliedRow);
         if (assets.imageUrls.length > 0) {
           for (const imgUrl of assets.imageUrls.slice(0, 3)) {
@@ -3593,7 +3681,12 @@ export async function handleInboundMessengerMessage(params: {
   if (earlySelectedOptionRow && !hasIncomingImages && !looksLikeOrderDetailsSupply(trimmed)) {
     await setLastCatalogSku(conversationId, earlySelectedOptionRow.clientSku);
     if (earlyIntent === "ask_size_chart") {
-      const reply = buildSizeChartReply(earlySelectedOptionRow, trimmed, settings.sizeCharts);
+      const reply = buildSizeChartReply(
+        earlySelectedOptionRow,
+        trimmed,
+        settings.sizeCharts,
+        tenant.businessCategory,
+      );
       await sendMessengerText({
         pageAccessToken: pageAccessToken,
         psid: params.psid,
@@ -3603,10 +3696,8 @@ export async function handleInboundMessengerMessage(params: {
       await logAssistantTurn(conversationId, reply);
       return;
     }
-    const selectionAck = buildDeterministicCatalogReply(earlySelectedOptionRow, {
-      addOns: settings.addOns,
-      includeCta: false,
-    });
+    const selectionAck = buildDeterministicCatalogReply(earlySelectedOptionRow, { addOns: settings.addOns,
+      includeCta: false, businessCategory: tenant.businessCategory });
     await sendMessengerText({
       pageAccessToken: pageAccessToken,
       psid: params.psid,
@@ -3848,7 +3939,7 @@ export async function handleInboundMessengerMessage(params: {
         await setDraftCartItems(conversationId, updated);
         const stillMissing = updated.filter((it) => !it.size?.trim());
         if (stillMissing.length > 0) {
-          const askNext = stillMissing.map((it) => `${pickTeamEmoji(it.product)} ${it.product} — kon size?`).join("\n");
+          const askNext = stillMissing.map((it) => `${pickTeamEmoji(it.product, undefined, tenant.businessCategory)} ${it.product} — kon size?`).join("\n");
           await sendMessengerText({ pageAccessToken, psid: params.psid, text: askNext, within24hWindow: within24h });
           await logAssistantTurn(conversationId, askNext);
           return;
@@ -3898,7 +3989,7 @@ export async function handleInboundMessengerMessage(params: {
       await setDraftCartItems(conversationId, updated);
       const stillMissing = updated.filter((it) => !it.size?.trim());
       if (stillMissing.length > 0) {
-        const askNext = stillMissing.map((it) => `${pickTeamEmoji(it.product)} ${it.product} — kon size?`).join("\n");
+        const askNext = stillMissing.map((it) => `${pickTeamEmoji(it.product, undefined, tenant.businessCategory)} ${it.product} — kon size?`).join("\n");
         await sendMessengerText({ pageAccessToken, psid: params.psid, text: askNext, within24hWindow: within24h });
         await logAssistantTurn(conversationId, askNext);
         return;
@@ -3999,7 +4090,7 @@ export async function handleInboundMessengerMessage(params: {
         await logAssistantTurn(conversationId, ask);
         return;
       }
-      const flag = pickTeamEmoji(productNameEA);
+      const flag = pickTeamEmoji(productNameEA, undefined, tenant.businessCategory);
       const askSzEA = `${flag} ${productNameEA} + ${selectedEA.map((a) => a.label).join(", ")} add korlam 😊\n\nEkhon size bolen pls — M / L / XL?`;
       await sendMessengerText({ pageAccessToken, psid: params.psid, text: askSzEA, within24hWindow: within24h });
       await logAssistantTurn(conversationId, askSzEA);
@@ -4065,7 +4156,7 @@ export async function handleInboundMessengerMessage(params: {
       const itemsMissingSize = cartNow.filter((it) => !String(it.size ?? "").trim());
       if (itemsMissingSize.length > 0) {
         const askLines = itemsMissingSize.map((it) => {
-          const flag = pickTeamEmoji(it.product);
+          const flag = pickTeamEmoji(it.product, undefined, tenant.businessCategory);
           return `${flag} ${it.product} — kon size? (M / L / XL)`;
         });
         const sizeAsk = ["Size confirm korun 😊", "", ...askLines].join("\n");
@@ -4167,6 +4258,7 @@ export async function handleInboundMessengerMessage(params: {
           within24hWindow: within24h,
           conversationId,
           tenantSlug: params.tenantSlug,
+          businessCategory: tenant.businessCategory,
         });
         return;
       }
@@ -4182,7 +4274,7 @@ export async function handleInboundMessengerMessage(params: {
       const broad = findBroadJerseyCandidates(mappings, MAX_CATALOG_OPTION_LIST);
       if (broad.length > 0) {
         const options = broad.map(buildCatalogOptionItem);
-        const listReply = buildCatalogOptionsReply(options);
+        const listReply = buildCatalogOptionsReply(options, { businessCategory: tenant.businessCategory });
         if (await hasRepeatedCollectionList(conversationId, listReply)) {
           const short = "Already collection dekhiyechi 😊 Kon team er jersey lagbe bolun, or uporer list theke product name + size din.";
           await sendMessengerText({ pageAccessToken, psid: params.psid, text: short, within24hWindow: within24h });
@@ -4247,7 +4339,7 @@ export async function handleInboundMessengerMessage(params: {
       !looksLikeOrderDetailsSupply(trimmed)
     ) {
       const options = textMatches.map(buildCatalogOptionItem);
-      const listReply = buildCatalogOptionsReply(options);
+      const listReply = buildCatalogOptionsReply(options, { businessCategory: tenant.businessCategory });
       if (await hasRepeatedCollectionList(conversationId, listReply)) {
         const short = "Ei collection already dekhiyechi 😊 List theke kon product ta niben bolun — product name + size dile order add kori.";
         await sendMessengerText({ pageAccessToken, psid: params.psid, text: short, within24hWindow: within24h });
@@ -4413,7 +4505,7 @@ export async function handleInboundMessengerMessage(params: {
       }
       if (!row && candidates.length >= 2) {
         const options = candidates.map(buildCatalogOptionItem);
-        const listReply = buildCatalogOptionsReply(options);
+        const listReply = buildCatalogOptionsReply(options, { businessCategory: tenant.businessCategory });
         if (await hasRepeatedCollectionList(conversationId, listReply)) {
           const short = "Ei collection already dekhiyechi 😊 List theke kon product ta niben bolun — product name + size dile order add kori.";
           await sendMessengerText({ pageAccessToken, psid: params.psid, text: short, within24hWindow: within24h });
@@ -4536,10 +4628,8 @@ export async function handleInboundMessengerMessage(params: {
 
     if (row) {
       if (selectedExplicitly) {
-        const selectionAck = buildDeterministicCatalogReply(row, {
-          addOns: settings.addOns,
-          includeCta: false,
-        });
+        const selectionAck = buildDeterministicCatalogReply(row, { addOns: settings.addOns,
+          includeCta: false, businessCategory: tenant.businessCategory });
         await sendMessengerText({
           pageAccessToken: pageAccessToken,
           psid: params.psid,
@@ -4596,7 +4686,7 @@ export async function handleInboundMessengerMessage(params: {
               await logAssistantTurn(conversationId, short);
               return;
             }
-            const browseReply = buildBrowseFirstCatalogReply(row, settings, addonSnippet);
+            const browseReply = buildBrowseFirstCatalogReply(row, settings, addonSnippet, tenant.businessCategory);
             await sendMessengerText({
               pageAccessToken: pageAccessToken,
               psid: params.psid,
@@ -4633,7 +4723,7 @@ export async function handleInboundMessengerMessage(params: {
             !size;
           // When NOT an addon request and no size given, ask for size before adding.
           if (!addonOnlyIntent && !size) {
-            const flag = pickTeamEmoji(productName);
+            const flag = pickTeamEmoji(productName, undefined, tenant.businessCategory);
             const askSize = [
               "Sure 😊",
               "",
@@ -4661,7 +4751,7 @@ export async function handleInboundMessengerMessage(params: {
             if (existingIdx >= 0) {
               const existing = currentCart[existingIdx]!;
               if (!String(existing.size ?? "").trim()) {
-                const flag = pickTeamEmoji(productName);
+                const flag = pickTeamEmoji(productName, undefined, tenant.businessCategory);
                 const askSz = [
                   "Age oi jersey er size ta fix korte hobe 😊",
                   "",
@@ -4929,7 +5019,7 @@ export async function handleInboundMessengerMessage(params: {
             await logAssistantTurn(conversationId, ask);
             return;
           }
-          const flag = pickTeamEmoji(productNameAd);
+          const flag = pickTeamEmoji(productNameAd, undefined, tenant.businessCategory);
           const askSz = `${flag} ${productNameAd} + ${selectedAd.map((a) => a.label).join(", ")} add korlam 😊\n\nEkhon size bolen pls — M / L / XL?`;
           await sendMessengerText({ pageAccessToken, psid: params.psid, text: askSz, within24hWindow: within24h });
           await logAssistantTurn(conversationId, askSz);
@@ -4948,9 +5038,14 @@ export async function handleInboundMessengerMessage(params: {
       const isRepeat = await hasRepeatedProductCard(conversationId, rowLabel);
       let deterministicReply = isRepeat
         ? `${rowLabel} er details already dekhiyechi 😊 Size ar qty dile add kore dibo, or onno jersey name bolun.`
-        : buildDeterministicCatalogReply(row, { addOns: settings.addOns });
+        : buildDeterministicCatalogReply(row, { addOns: settings.addOns, businessCategory: tenant.businessCategory });
       if (!isRepeat && catalogIntent === "ask_size_chart")
-        deterministicReply = buildSizeChartReply(row, trimmed, settings.sizeCharts);
+        deterministicReply = buildSizeChartReply(
+          row,
+          trimmed,
+          settings.sizeCharts,
+          tenant.businessCategory,
+        );
       else if (!isRepeat && catalogIntent === "ask_price_stock") {
         deterministicReply = buildPriceStockReply(row, { addOns: settings.addOns });
       }
@@ -4970,7 +5065,7 @@ export async function handleInboundMessengerMessage(params: {
           const itemsMissingSize = cartNow.filter((it) => !String(it.size ?? "").trim());
           if (itemsMissingSize.length > 0) {
             const askLines = itemsMissingSize.map((it) => {
-              const flag = pickTeamEmoji(it.product);
+              const flag = pickTeamEmoji(it.product, undefined, tenant.businessCategory);
               return `${flag} ${it.product} — kon size? (M / L / XL)`;
             });
             deterministicReply = [
@@ -5150,10 +5245,26 @@ export async function handleInboundMessengerMessage(params: {
     if (!structured.name?.toString().trim()) missing.push("name");
     if (!structured.address) missing.push("courier address");
     if (!structured.phone) missing.push("mobile");
-    const sizeMissing =
-      structuredItems.length > 0
-        ? structuredItems.some((it) => it.product && !String(it.size ?? "").trim())
-        : Boolean(structured.product) && !String(structured.size ?? "").trim();
+    // Size is only required when the underlying product actually has variants.
+    // For cosmetics / restaurant / electronics / accessories where the catalog
+    // row carries no `sizeStocks` / `variants[]`, a "size" prompt would
+    // deadlock the order. We resolve each item's product to its catalog row
+    // and use the same `skuHasVariants` predicate the cart agent uses.
+    let sizeMissing = false;
+    if (structuredItems.length > 0) {
+      for (const it of structuredItems) {
+        if (!it.product) continue;
+        if (String(it.size ?? "").trim()) continue;
+        const meta = await resolveProductMetaByName(params.tenantId, it.product);
+        if (productMetaHasVariants(meta)) {
+          sizeMissing = true;
+          break;
+        }
+      }
+    } else if (structured.product && !String(structured.size ?? "").trim()) {
+      const meta = await resolveProductMetaByName(params.tenantId, String(structured.product));
+      if (productMetaHasVariants(meta)) sizeMissing = true;
+    }
     if (sizeMissing) missing.push("size");
     const introBits: string[] = [];
     if (productLabel) introBits.push(`${productLabel} order confirm korte nicher details din:`);

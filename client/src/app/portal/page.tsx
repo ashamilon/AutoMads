@@ -92,7 +92,7 @@ export default function PortalDashboardPage() {
         }
       />
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
         <StatCard
           label="Total orders"
           value={loading ? "—" : stats.total}
@@ -185,8 +185,8 @@ export default function PortalDashboardPage() {
         ) : recent.length === 0 ? (
           <EmptyState />
         ) : (
-          <div className="-mx-2 overflow-x-auto">
-            <table className="w-full text-left text-sm">
+          <div className="-mx-2 overflow-x-auto [scrollbar-width:thin]">
+            <table className="w-full min-w-[560px] text-left text-sm">
               <thead>
                 <tr className="label-caps text-slate-500">
                   <th className="px-2 pb-3">When</th>
@@ -199,7 +199,7 @@ export default function PortalDashboardPage() {
               <tbody className="divide-y divide-white/[0.05]">
                 {recent.map((o) => (
                   <tr key={o.id} className="text-slate-300 transition hover:bg-white/[0.02]">
-                    <td className="px-2 py-3 text-xs text-slate-500">
+                    <td className="whitespace-nowrap px-2 py-3 text-xs text-slate-500">
                       {formatDistanceToNow(new Date(o.createdAt), { addSuffix: true })}
                     </td>
                     <td className="px-2 py-3">
@@ -216,7 +216,7 @@ export default function PortalDashboardPage() {
                     <td className="px-2 py-3">
                       <Badge tone={paymentTone(o.paymentStatus)}>{o.paymentStatus}</Badge>
                     </td>
-                    <td className="px-2 py-3 text-right tabular-figures">
+                    <td className="whitespace-nowrap px-2 py-3 text-right tabular-figures">
                       {o.totalAmount != null ? `${o.totalAmount} ${o.currency || ""}` : "—"}
                     </td>
                   </tr>

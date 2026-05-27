@@ -35,6 +35,13 @@ export async function getMe(req: Request, res: Response): Promise<void> {
     facebookPageId: t.facebookPageId,
     hasFacebookPageAccessToken: !!t.facebookPageAccessToken,
     settings: t.settings,
+    // Surfaced for the onboarding redirect logic in the client. `null` means
+    // the wizard has not been completed; the portal is gated until the
+    // tenant runs through the wizard once.
+    onboardingCompletedAt: t.onboardingCompletedAt
+      ? t.onboardingCompletedAt.toISOString()
+      : null,
+    businessCategory: t.businessCategory ?? null,
     integration: integration
       ? { type: integration.type, config: maskSecrets(integration.config) }
       : null,
@@ -463,7 +470,12 @@ export async function markOrderPaidManually(req: Request, res: Response): Promis
       verifiedBy: parsed.data.verifiedBy,
       note: parsed.data.note,
     });
-    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    // Defense-in-depth: re-read the order with explicit tenant scope so the
+    // controller never returns a row outside the caller's tenant, even if
+    // `confirmManualPayment`'s validation ever regresses.
+    const order = await prisma.order.findFirst({
+      where: { id: orderId, tenantId: t.id },
+    });
     res.json({ ok: true, order });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -756,7 +768,16 @@ export async function simulateChat(req: Request, res: Response): Promise<void> {
     res.status(400).json({ error: "text or images required" });
     return;
   }
-  const psid = (parsed.data.psid?.trim() || `SIM_${t.id.slice(0, 10)}`).replace(/\s+/g, "_");
+  // Sandbox PSIDs MUST start with `SIM_` so:
+  //   1. `isSimulatorPsid()` short-circuits real Messenger sends, and
+  //   2. a tenant cannot inject a real customer PSID (theirs or someone
+  //      else's) and have the agent persist a "real" conversation or
+  //      send a real Graph-API reply.
+  // We accept the user's optional `psid` only as a per-session label that
+  // we sanitise + force-prefix with `SIM_` and the tenant id, so two
+  // tenants can never collide on the same simulator conversation row.
+  const rawPsid = (parsed.data.psid?.trim() || "default").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64);
+  const psid = `SIM_${t.id.slice(0, 10)}_${rawPsid}`;
   const startedAt = new Date();
   await handleInboundMessengerMessage({
     tenantId: t.id,

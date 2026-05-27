@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Section } from "@/components/ui/section";
 import { useTenant } from "@/context/tenant-context";
 import { apiFetch } from "@/lib/api";
+import { useCategorySchema, getVariantEnumValues, findAttributeField } from "@/lib/useCategorySchema";
 import { parseProductCatalogCsv } from "@/lib/parseProductCsv";
 import { cn } from "@/lib/utils";
 import type { ProductMappingRow, TenantMe } from "@/lib/types";
@@ -419,6 +420,34 @@ function buildManualMetadata(args: {
 
 export default function CatalogPage() {
   const { tenant, refresh } = useTenant();
+  const { schema: categorySchema } = useCategorySchema();
+  const businessCategory = tenant?.businessCategory ?? null;
+  const isJerseyCategory = businessCategory === "jersey" || businessCategory === null;
+  // Schema-driven size enum: jersey/clothing → 'size', shoes → 'shoe_size',
+  // restaurant → 'portion_size'. Falls back to the legacy clothing list when
+  // the schema doesn't declare any of those fields (e.g. an electronics
+  // tenant whose products don't have variants).
+  const variantSizeKey = categorySchema
+    ? findAttributeField(categorySchema.variantAttributes, "size")
+      ? "size"
+      : findAttributeField(categorySchema.variantAttributes, "shoe_size")
+        ? "shoe_size"
+        : findAttributeField(categorySchema.variantAttributes, "portion_size")
+          ? "portion_size"
+          : "size"
+    : "size";
+  const variantSizeOptions: string[] = (() => {
+    const fromSchema = getVariantEnumValues(categorySchema, variantSizeKey);
+    if (fromSchema.length > 0) return fromSchema;
+    return ["S", "M", "L", "XL", "XXL", "XS"];
+  })();
+  const variantSizeLabel = (() => {
+    const field = findAttributeField(
+      categorySchema?.variantAttributes,
+      variantSizeKey,
+    );
+    return field?.label ?? "Size";
+  })();
   const integrationType = tenant?.integration?.type as string | undefined;
   const isDatabaseMode = integrationType === "DATABASE";
 
@@ -1262,7 +1291,17 @@ export default function CatalogPage() {
                     value={sku}
                     onChange={(e) => setSku(e.target.value)}
                     required
-                    placeholder="e.g. JERSEY-BR-01"
+                    placeholder={
+                      isJerseyCategory
+                        ? "e.g. JERSEY-BR-01"
+                        : businessCategory === "shoes"
+                          ? "e.g. SHOE-RUN-01"
+                          : businessCategory === "restaurant"
+                            ? "e.g. MENU-BIRYANI-01"
+                            : businessCategory === "cosmetics"
+                              ? "e.g. LIP-MATTE-01"
+                              : "e.g. PROD-001"
+                    }
                     className={inputCls}
                     autoComplete="off"
                   />
@@ -1274,7 +1313,17 @@ export default function CatalogPage() {
                   <input
                     value={productName}
                     onChange={(e) => setProductName(e.target.value)}
-                    placeholder="e.g. Brazil away jersey 2026"
+                    placeholder={
+                      isJerseyCategory
+                        ? "e.g. Brazil away jersey 2026"
+                        : businessCategory === "shoes"
+                          ? "e.g. Mens running shoes 42"
+                          : businessCategory === "restaurant"
+                            ? "e.g. Chicken biryani full"
+                            : businessCategory === "cosmetics"
+                              ? "e.g. Matte lipstick coral"
+                              : "Product name shown to customers"
+                    }
                     className={inputCls}
                   />
                 </Field>
@@ -1338,20 +1387,22 @@ export default function CatalogPage() {
                   </Field>
                 </div>
               </div>
-              <Field
-                label="Kit type"
-                hint="Used for size-chart hints (player = tighter authentic fit, fan = replica) when you do not attach a custom size chart."
-              >
-                <select
-                  value={jerseyVersion}
-                  onChange={(e) => setJerseyVersion(e.target.value as "" | "player" | "fan")}
-                  className={inputCls}
+              {isJerseyCategory && (
+                <Field
+                  label="Kit type"
+                  hint="Used for size-chart hints (player = tighter authentic fit, fan = replica) when you do not attach a custom size chart."
                 >
-                  <option value="">Not specified</option>
-                  <option value="fan">Fan version (replica / standard)</option>
-                  <option value="player">Player version (authentic / on-field)</option>
-                </select>
-              </Field>
+                  <select
+                    value={jerseyVersion}
+                    onChange={(e) => setJerseyVersion(e.target.value as "" | "player" | "fan")}
+                    className={inputCls}
+                  >
+                    <option value="">Not specified</option>
+                    <option value="fan">Fan version (replica / standard)</option>
+                    <option value="player">Player version (authentic / on-field)</option>
+                  </select>
+                </Field>
+              )}
               <Field
                 label="Tags"
                 hint="Comma-separated keywords to help customers find this product (e.g. yellow, retro, full sleeve, 2026). These are used for search matching."
@@ -1365,9 +1416,9 @@ export default function CatalogPage() {
               </Field>
               <div className="space-y-2">
                 <div className="flex flex-wrap items-end justify-between gap-2">
-                  <span className="label-caps text-slate-400">Stock by size</span>
+                  <span className="label-caps text-slate-400">Stock by {variantSizeLabel.toLowerCase()}</span>
                   <div className="flex flex-wrap gap-1.5">
-                    {(["S", "M", "L", "XL", "XXL", "XS"] as const).map((sz) => (
+                    {variantSizeOptions.map((sz) => (
                       <button
                         key={sz}
                         type="button"

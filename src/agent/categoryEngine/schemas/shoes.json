@@ -1,0 +1,117 @@
+{
+  "slug": "shoes",
+  "version": 1,
+  "attributes": [
+    {
+      "key": "shoe_size",
+      "label": "Shoe Size",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["38", "39", "40", "41", "42", "43", "44", "45"]
+    },
+    {
+      "key": "gender",
+      "label": "Gender",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["men", "women", "unisex", "kids"]
+    },
+    {
+      "key": "sole_type",
+      "label": "Sole Type",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["rubber", "leather", "eva", "tpr"]
+    },
+    {
+      "key": "width",
+      "label": "Width",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["narrow", "regular", "wide"]
+    }
+  ],
+  "variantAttributes": [
+    {
+      "key": "shoe_size",
+      "label": "Shoe Size",
+      "type": "enum",
+      "required": true,
+      "customerVisible": true,
+      "enumValues": ["38", "39", "40", "41", "42", "43", "44", "45"]
+    },
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "orderAttributes": [
+    {
+      "key": "shoe_size",
+      "label": "Shoe Size",
+      "type": "enum",
+      "required": true,
+      "customerVisible": true,
+      "enumValues": ["38", "39", "40", "41", "42", "43", "44", "45"]
+    },
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "filterAttributes": [
+    {
+      "key": "gender",
+      "label": "Gender",
+      "type": "enum",
+      "required": false,
+      "customerVisible": false,
+      "enumValues": ["men", "women", "unisex", "kids"]
+    },
+    {
+      "key": "sole_type",
+      "label": "Sole Type",
+      "type": "enum",
+      "required": false,
+      "customerVisible": false,
+      "enumValues": ["rubber", "leather", "eva", "tpr"]
+    }
+  ],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "shoe_size_chart",
+    "gender_filter",
+    "product_grid",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {
+    "intentHints": ["shoe_size_inquiry", "shoe_gender_inquiry"],
+    "recommendationStrategy": "size_first",
+    "requiresDeliveryEstimate": false,
+    "compatibilityCheckRequired": false
+  },
+  "promptFragments": [
+    "You sell shoes. Confirm shoe size and gender before recommending."
+  ],
+  "isBuiltIn": true,
+  "tenantId": null
+}

@@ -151,7 +151,7 @@ export default function OrdersPage() {
       />
 
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="relative max-w-md flex-1">
+        <div className="relative w-full lg:max-w-md lg:flex-1">
           <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
           <input
             value={query}
@@ -161,8 +161,8 @@ export default function OrdersPage() {
             className="w-full rounded-xl border border-white/[0.08] bg-white/[0.03] py-2.5 pl-10 pr-4 text-sm text-slate-100 placeholder:text-slate-600 focus:border-accent/40 focus:outline-none focus:ring-1 focus:ring-accent/30"
           />
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Filter className="h-3.5 w-3.5 text-slate-600" />
+        <div className="-mx-1 flex items-center gap-2 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:overflow-visible lg:pb-0">
+          <Filter className="h-3.5 w-3.5 shrink-0 text-slate-600" />
           {filters.map((f) => {
             const a = filter === f.id;
             return (
@@ -170,7 +170,7 @@ export default function OrdersPage() {
                 key={f.id}
                 type="button"
                 onClick={() => setFilter(f.id)}
-                className={`group inline-flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-xs font-medium transition ${
+                className={`group inline-flex shrink-0 items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition sm:px-3.5 ${
                   a
                     ? "border-accent/40 bg-accent/15 text-white"
                     : "border-white/[0.08] bg-white/[0.03] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200"
@@ -189,7 +189,7 @@ export default function OrdersPage() {
               </button>
             );
           })}
-          <div className="relative ml-auto lg:ml-0">
+          <div className="relative ml-auto shrink-0 lg:ml-0">
             <select
               value={sort}
               onChange={(e) => setSort(e.target.value as SortKey)}
@@ -226,8 +226,8 @@ export default function OrdersPage() {
                   <span className="h-px flex-1 bg-white/[0.06]" />
                   <span className="text-[11px] font-medium text-slate-500">{list.length}</span>
                 </div>
-                <div className="overflow-hidden rounded-xl border border-white/[0.06]">
-                  <table className="w-full text-left text-sm">
+                <div className="overflow-x-auto rounded-xl border border-white/[0.06] [scrollbar-width:thin]">
+                  <table className="w-full min-w-[640px] text-left text-sm">
                     <tbody className="divide-y divide-white/[0.05]">
                       {list.map((o) => (
                         <OrderRowItem key={o.id} order={o} />

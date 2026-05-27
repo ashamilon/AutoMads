@@ -1,0 +1,105 @@
+{
+  "slug": "jewelry",
+  "version": 1,
+  "attributes": [
+    {
+      "key": "metal",
+      "label": "Metal",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["gold", "silver", "platinum", "rose_gold", "white_gold"]
+    },
+    {
+      "key": "weight_grams",
+      "label": "Weight",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "g"
+    },
+    {
+      "key": "gemstone",
+      "label": "Gemstone",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "purity",
+      "label": "Purity",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["18k", "21k", "22k", "24k", "925"]
+    }
+  ],
+  "variantAttributes": [
+    {
+      "key": "size",
+      "label": "Size",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "orderAttributes": [
+    {
+      "key": "size",
+      "label": "Size",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "engraving",
+      "label": "Engraving",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "filterAttributes": [
+    {
+      "key": "metal",
+      "label": "Metal",
+      "type": "enum",
+      "required": false,
+      "customerVisible": false,
+      "enumValues": ["gold", "silver", "platinum", "rose_gold", "white_gold"]
+    },
+    {
+      "key": "purity",
+      "label": "Purity",
+      "type": "enum",
+      "required": false,
+      "customerVisible": false,
+      "enumValues": ["18k", "21k", "22k", "24k", "925"]
+    }
+  ],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "product_grid",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {
+    "intentHints": ["jewelry_metal_inquiry", "jewelry_purity_inquiry"],
+    "recommendationStrategy": "metal_first",
+    "requiresDeliveryEstimate": false,
+    "compatibilityCheckRequired": false
+  },
+  "promptFragments": [
+    "You sell jewelry. Confirm metal type, purity, and ring/bangle size before recommending."
+  ],
+  "isBuiltIn": true,
+  "tenantId": null
+}

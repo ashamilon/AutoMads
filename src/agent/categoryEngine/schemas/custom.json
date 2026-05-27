@@ -1,0 +1,26 @@
+{
+  "slug": "custom",
+  "version": 1,
+  "attributes": [],
+  "variantAttributes": [],
+  "orderAttributes": [],
+  "filterAttributes": [],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "product_grid",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {},
+  "promptFragments": [],
+  "isBuiltIn": true,
+  "tenantId": null
+}

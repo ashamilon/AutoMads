@@ -37,10 +37,19 @@ export const sizeChartTools: ToolDef[] = [
       }
       const tenant = await prisma.tenant.findUnique({
         where: { id: ctx.input.tenantId },
-        select: { settings: true },
+        select: { settings: true, businessCategory: true },
       });
       const settings = parseTenantSettings(tenant?.settings);
-      const chart = buildSizeChartReply(row, args.hint, settings.sizeCharts);
+      // Prefer the frozen reasoning_context (already loaded once per turn);
+      // fall back to the freshly-read tenant row for legacy callers / tests.
+      const businessCategory =
+        ctx.reasoningContext?.businessCategory ?? tenant?.businessCategory ?? null;
+      const chart = buildSizeChartReply(
+        row,
+        args.hint,
+        settings.sizeCharts,
+        businessCategory,
+      );
       return {
         ok: true,
         observation:

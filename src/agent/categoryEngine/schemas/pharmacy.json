@@ -1,0 +1,95 @@
+{
+  "slug": "pharmacy",
+  "version": 1,
+  "attributes": [
+    {
+      "key": "dosage",
+      "label": "Dosage",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "form",
+      "label": "Form",
+      "type": "enum",
+      "required": false,
+      "customerVisible": true,
+      "enumValues": ["tablet", "capsule", "syrup", "injection", "ointment", "drops"]
+    },
+    {
+      "key": "prescription_required",
+      "label": "Prescription Required",
+      "type": "boolean",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "variantAttributes": [
+    {
+      "key": "dosage",
+      "label": "Dosage",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "orderAttributes": [
+    {
+      "key": "prescription_image",
+      "label": "Prescription Image",
+      "type": "image_ref",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "delivery_notes",
+      "label": "Delivery Notes",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "filterAttributes": [
+    {
+      "key": "form",
+      "label": "Form",
+      "type": "enum",
+      "required": false,
+      "customerVisible": false,
+      "enumValues": ["tablet", "capsule", "syrup", "injection", "ointment", "drops"]
+    },
+    {
+      "key": "prescription_required",
+      "label": "Prescription Required",
+      "type": "boolean",
+      "required": false,
+      "customerVisible": false
+    }
+  ],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "product_grid",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {
+    "intentHints": ["pharmacy_dosage_inquiry", "pharmacy_prescription_inquiry"],
+    "recommendationStrategy": "dosage_first",
+    "requiresDeliveryEstimate": false,
+    "compatibilityCheckRequired": false
+  },
+  "promptFragments": [
+    "You sell pharmacy products. When prescription is required, request a prescription image before confirming."
+  ],
+  "isBuiltIn": true,
+  "tenantId": null
+}

@@ -1165,3 +1165,45 @@ pre.json {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+
+/* --------------------------------------------------------------------------
+   Active category schema banner. Sits below the topbar, shown only when the
+   operator is viewing a specific tenant (legacy admin UI is preserved per
+   R23.6; this banner adds Commerce_OS context without changing behavior).
+   Subtle blue/grey tint — must not read as a primary control.
+   -------------------------------------------------------------------------- */
+.schema-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 32px;
+  margin-top: 12px;
+  padding: 8px 14px;
+  font-size: 12px;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  background: rgba(96, 165, 250, 0.06);
+  color: var(--text-dim);
+  border-radius: 8px;
+}
+.schema-banner-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-mute);
+}
+.schema-banner-slug {
+  font-family: var(--font-mono);
+  color: var(--info);
+  font-weight: 500;
+}
+.schema-banner-meta {
+  color: var(--text-mute);
+  font-size: 11px;
+}
+@media (max-width: 720px) {
+  .schema-banner {
+    margin: 12px 20px 0;
+  }
+}

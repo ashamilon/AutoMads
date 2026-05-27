@@ -1,0 +1,101 @@
+{
+  "slug": "furniture",
+  "version": 1,
+  "attributes": [
+    {
+      "key": "dimensions",
+      "label": "Dimensions",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "material",
+      "label": "Material",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "weight_kg",
+      "label": "Weight",
+      "type": "number",
+      "required": false,
+      "customerVisible": true,
+      "unit": "kg"
+    }
+  ],
+  "variantAttributes": [
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "orderAttributes": [
+    {
+      "key": "assembly_required",
+      "label": "Assembly Required",
+      "type": "boolean",
+      "required": false,
+      "customerVisible": true
+    },
+    {
+      "key": "delivery_notes",
+      "label": "Delivery Notes",
+      "type": "string",
+      "required": false,
+      "customerVisible": true
+    }
+  ],
+  "filterAttributes": [
+    {
+      "key": "material",
+      "label": "Material",
+      "type": "string",
+      "required": false,
+      "customerVisible": false
+    },
+    {
+      "key": "color",
+      "label": "Color",
+      "type": "string",
+      "required": false,
+      "customerVisible": false
+    }
+  ],
+  "terminology": {
+    "catalog": "product list",
+    "cart": "order list",
+    "checkout": "order confirm",
+    "select": "choose koren",
+    "selected": "basaye nilen",
+    "selection": "kon ta niben bolun",
+    "sku": "product code"
+  },
+  "dashboardModules": [
+    "product_grid",
+    "orders_table",
+    "conversations_panel"
+  ],
+  "workflowRules": {
+    "intentHints": ["furniture_dimensions_inquiry", "furniture_assembly_inquiry"],
+    "recommendationStrategy": "dimensions_first",
+    "requiresDeliveryEstimate": true,
+    "compatibilityCheckRequired": false
+  },
+  "promptFragments": [
+    "You sell furniture. Confirm dimensions, material, and assembly preferences. Provide a delivery estimate."
+  ],
+  "isBuiltIn": true,
+  "tenantId": null
+}

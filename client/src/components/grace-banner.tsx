@@ -60,7 +60,7 @@ export function GraceBanner() {
 
   return (
     <div className="mb-4 rounded-xl border border-amber-500/30 bg-gradient-to-r from-amber-500/10 to-amber-500/5 px-4 py-3 text-sm">
-      <div className="flex items-start gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
         <div className="mt-0.5 grid h-7 w-7 flex-shrink-0 place-items-center rounded-lg bg-amber-500/20">
           <Megaphone className="h-3.5 w-3.5 text-amber-300" />
         </div>
@@ -88,7 +88,7 @@ export function GraceBanner() {
           type="button"
           onClick={endEarly}
           disabled={ending}
-          className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20 disabled:opacity-50"
+          className="shrink-0 self-start rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20 disabled:opacity-50"
         >
           {ending ? "Ending…" : "End early"}
         </button>

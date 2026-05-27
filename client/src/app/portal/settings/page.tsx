@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Section, Tabs } from "@/components/ui/section";
 import { useTenant } from "@/context/tenant-context";
 import { apiFetch, apiFormPost, getWebhookBase } from "@/lib/api";
+import { useCategorySchema, getVariantEnumValues } from "@/lib/useCategorySchema";
 import { cn } from "@/lib/utils";
 import {
   Bot,
@@ -98,6 +99,29 @@ const DEFAULT_FAN_VERSION_CHART: SizeChart = {
     { size: "XXL", length: 31, chest: 46 },
   ],
 };
+
+/**
+ * Build a generic, category-aware size chart preset from the schema's
+ * variant enum values. Used for non-jersey tenants whose size dimensions
+ * (shoe_size, portion_size, neutral S/M/L) come from `categorySchema.
+ * variantAttributes`. We seed empty measurement columns; the operator
+ * fills the values that matter for their products.
+ */
+function buildPresetFromVariantSizes(args: {
+  label: string;
+  aliases: string[];
+  sizes: string[];
+  isDefault?: boolean;
+}): SizeChart {
+  const sizes = args.sizes.length > 0 ? args.sizes : ["S", "M", "L", "XL", "XXL"];
+  return {
+    id: `preset-${args.label.toLowerCase().replace(/\s+/g, "-")}-${Date.now().toString(36)}`,
+    label: args.label,
+    aliases: args.aliases,
+    isDefault: args.isDefault === true,
+    rows: sizes.map((size) => ({ size })),
+  };
+}
 
 type TestState = { status: "idle" | "testing" | "ok" | "fail"; message?: string; detail?: string };
 
@@ -210,6 +234,9 @@ type SettingsShape = {
 
 export default function SettingsPage() {
   const { tenant, refresh } = useTenant();
+  const { schema: categorySchema } = useCategorySchema();
+  const businessCategory = tenant?.businessCategory ?? null;
+  const isJerseyCategory = businessCategory === "jersey" || businessCategory === null;
   const [tab, setTab] = useState<TabId>("general");
   const [settings, setSettings] = useState<SettingsShape>({});
   const [json, setJson] = useState("{}");
@@ -1493,26 +1520,67 @@ export default function SettingsPage() {
       {tab === "size-charts" && (
         <Section
           title="Size charts library"
-          description="Define multiple charts (Player Version, Fan Version, Kids, Women, etc). When a customer asks for a size chart, the bot picks the best match from this list using your label + aliases. The chart marked Default is used when no alias matches."
+          description={
+            isJerseyCategory
+              ? "Define multiple charts (Player Version, Fan Version, Kids, Women, etc). When a customer asks for a size chart, the bot picks the best match from this list using your label + aliases. The chart marked Default is used when no alias matches."
+              : "Define size charts for your products. The bot picks the best match using label + aliases when a customer asks. The chart marked Default is used when no alias matches."
+          }
           actions={
             <div className="flex flex-wrap items-center gap-2">
               <Button variant="ghost" className="gap-2" onClick={() => addSizeChart()}>
                 <Plus className="h-4 w-4" /> New chart
               </Button>
-              <Button
-                variant="ghost"
-                className="gap-2"
-                onClick={() => addSizeChart(DEFAULT_PLAYER_VERSION_CHART)}
-              >
-                <Copy className="h-4 w-4" /> Add Player Version preset
-              </Button>
-              <Button
-                variant="ghost"
-                className="gap-2"
-                onClick={() => addSizeChart(DEFAULT_FAN_VERSION_CHART)}
-              >
-                <Copy className="h-4 w-4" /> Add Fan Version preset
-              </Button>
+              {isJerseyCategory ? (
+                <>
+                  <Button
+                    variant="ghost"
+                    className="gap-2"
+                    onClick={() => addSizeChart(DEFAULT_PLAYER_VERSION_CHART)}
+                  >
+                    <Copy className="h-4 w-4" /> Add Player Version preset
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="gap-2"
+                    onClick={() => addSizeChart(DEFAULT_FAN_VERSION_CHART)}
+                  >
+                    <Copy className="h-4 w-4" /> Add Fan Version preset
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  variant="ghost"
+                  className="gap-2"
+                  onClick={() =>
+                    addSizeChart(
+                      buildPresetFromVariantSizes({
+                        label: businessCategory === "shoes"
+                          ? "Standard Shoe Sizes"
+                          : businessCategory === "restaurant"
+                            ? "Portion Sizes"
+                            : "Standard Sizes",
+                        aliases:
+                          businessCategory === "shoes"
+                            ? ["shoe", "shoe size", "size", "fit"]
+                            : businessCategory === "restaurant"
+                              ? ["portion", "portion size", "serving", "size"]
+                              : ["size", "standard"],
+                        sizes: getVariantEnumValues(
+                          categorySchema,
+                          businessCategory === "shoes"
+                            ? "shoe_size"
+                            : businessCategory === "restaurant"
+                              ? "portion_size"
+                              : "size",
+                        ),
+                        isDefault: true,
+                      }),
+                    )
+                  }
+                >
+                  <Copy className="h-4 w-4" /> Add {businessCategory === "shoes" ? "shoe size" : businessCategory === "restaurant" ? "portion" : "standard size"} preset
+                </Button>
+              )}
             </div>
           }
         >
@@ -1520,7 +1588,9 @@ export default function SettingsPage() {
             <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-white/[0.08] py-10 text-center">
               <Ruler className="h-6 w-6 text-slate-500" />
               <p className="text-sm text-slate-400">
-                No charts yet. Add the Player / Fan presets above or build a custom one.
+                {isJerseyCategory
+                  ? "No charts yet. Add the Player / Fan presets above or build a custom one."
+                  : "No charts yet. Add the preset above or build a custom one."}
               </p>
             </div>
           ) : (

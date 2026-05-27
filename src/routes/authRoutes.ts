@@ -12,6 +12,7 @@
  */
 
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import {
   activate,
   changePassword,
@@ -21,9 +22,21 @@ import {
 } from "../controllers/authController.js";
 import { requireTenantApiKey } from "../middlewares/tenantApiAuth.js";
 
+// Tight rate-limit on the auth surface so a leaked password / activation
+// token can't be brute-forced from a single IP. The global limiter (300 req
+// / minute) still applies; this stacks an additional 20 req / 15 min for the
+// public auth endpoints specifically.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "rate_limited", detail: "Too many auth attempts. Try again in a few minutes." },
+});
+
 export const authPublicRoutes = Router();
-authPublicRoutes.post("/activate", activate);
-authPublicRoutes.post("/login", login);
+authPublicRoutes.post("/activate", authLimiter, activate);
+authPublicRoutes.post("/login", authLimiter, login);
 authPublicRoutes.post("/logout", logout);
 
 export const authAuthenticatedRoutes = Router();

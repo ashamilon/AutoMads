@@ -55,7 +55,20 @@ function enqueueTenantWebhookWork(tenantId: string, fn: () => Promise<void>): vo
 
 function verifySignature(rawBody: Buffer | undefined, signature: string | undefined): boolean {
   const secret = config.facebookAppSecret;
-  if (!secret) return true;
+  // Fail CLOSED if the app secret isn't configured. Earlier this returned
+  // `true` when the secret was empty, which meant a misconfigured production
+  // server (env var missing) would silently accept any unsigned payload —
+  // including spoofed customer messages forged by anyone who knows a tenant
+  // slug. Refusing the request makes the misconfiguration loud and makes
+  // spoofing impossible. Test harnesses that need to bypass should inject a
+  // real secret + sign the request, just like Meta does.
+  if (!secret) {
+    logger.error(
+      { event: "facebook_webhook_no_secret" },
+      "FACEBOOK_APP_SECRET is not set — refusing to accept unverified Messenger webhook payloads. Set the env var to enable signature verification.",
+    );
+    return false;
+  }
   if (!rawBody || !signature?.startsWith("sha256=")) return false;
   const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
   try {

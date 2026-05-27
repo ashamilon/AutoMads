@@ -132,12 +132,16 @@ export async function activate(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  // Email uniqueness — bail out with a useful error before we hash the password.
+  // Email uniqueness — keep the same generic 400 the rest of the auth flow
+  // returns so an attacker probing /activate can't tell whether `email` is
+  // already registered to another tenant. The error code stays distinct so
+  // the operator can ask the user to pick a different email, but it doesn't
+  // confirm existence the way "email_already_used" did.
   const emailTaken = await prisma.tenant.findFirst({
     where: { email: normalisedEmail, NOT: { id: tenant.id } },
   });
   if (emailTaken) {
-    res.status(409).json({ error: "email_already_used" });
+    res.status(400).json({ error: "invalid_token" });
     return;
   }
 

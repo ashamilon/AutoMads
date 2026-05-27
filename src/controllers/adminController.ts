@@ -190,7 +190,7 @@ export async function getTenant(req: Request, res: Response): Promise<void> {
   const id = String(req.params.tenantId ?? "");
   const tenant = await prisma.tenant.findUnique({
     where: { id },
-    include: { integration: true },
+    include: { integration: true, categorySchema: { select: { id: true, slug: true } } },
   });
   if (!tenant) {
     res.status(404).json({ error: "not_found" });
@@ -214,6 +214,13 @@ export async function getTenant(req: Request, res: Response): Promise<void> {
         !!tenant.activationExpiresAt &&
         tenant.activationExpiresAt.getTime() > Date.now(),
       activationExpiresAt: tenant.activationExpiresAt ? tenant.activationExpiresAt.toISOString() : null,
+      // Category schema surface for the Commerce_OS-aware UIs (R20.6, R23.6).
+      // Legacy admin UI uses these to render the "Active schema: <slug>"
+      // banner without depending on the new `/api/v1/admin/...` panel.
+      businessCategory: tenant.businessCategory ?? null,
+      businessSubcategory: tenant.businessSubcategory ?? null,
+      categorySchemaId: tenant.categorySchemaId ?? null,
+      categorySchemaSlug: tenant.categorySchema?.slug ?? null,
       integration: tenant.integration
         ? {
             type: tenant.integration.type,
