@@ -565,11 +565,18 @@ async function pickCandidateByCustomerImage(args: {
   customerImageBase64: string;
   /** Original Messenger CDN / data URL — used by `photoMatchService` for the URL-equality shortcut. */
   customerImageUrl?: string | null;
+  /** REQUIRED. The hash-based scan now sweeps the whole tenant catalog so a
+   * SKU not present in the team-text top-6 (e.g. "Brazil WC26 Special
+   * Edition" sitting at row #11 by stock rank) can still win on visual
+   * similarity. */
+  tenantId: string;
+  /** Pre-narrowed candidate list (e.g. team-filtered). Passed through to
+   * the URL/Cloudinary shortcut so it stays cheap, but the perceptual-hash
+   * scan ignores this and runs against the full catalog. */
   candidates: ProductMapping[];
   validSkus: Set<string>;
 }): Promise<ProductMapping | null> {
   const top = args.candidates.slice(0, 6);
-  if (top.length === 0) return null;
 
   // ── Stage 1+2: deterministic match (URL equality / perceptual hash) ──
   // Runs locally — no LLM round-trip — and short-circuits when the
@@ -581,7 +588,8 @@ async function pickCandidateByCustomerImage(args: {
       const outcome = await matchCustomerPhotoAgainstCatalog({
         customerImage: customerBuffer,
         customerImageUrl: args.customerImageUrl ?? null,
-        candidates: top,
+        tenantId: args.tenantId,
+        prefilterCandidates: top.length > 0 ? top : undefined,
       });
 
       if (
@@ -770,6 +778,7 @@ async function resolveBestCatalogMatchForSingleCustomerImage(args: {
       const visuallyPicked = await pickCandidateByCustomerImage({
         customerImageBase64: imageBase64,
         customerImageUrl: args.imageUrl ?? null,
+        tenantId: mappings[0]?.tenantId ?? "",
         candidates,
         validSkus,
       }).catch((e) => {
@@ -779,6 +788,32 @@ async function resolveBestCatalogMatchForSingleCustomerImage(args: {
       if (visuallyPicked) return { row: visuallyPicked, teamLabel };
       const textBest = findBestCatalogMatchByText(candidates, teamLabel || visionNames.join(" "));
       if (textBest) return { row: textBest, teamLabel };
+    }
+  }
+
+  // ── STEP 2.5: full-catalog visual sweep ─────────────────────────────────
+  // Even when jersey vision didn't fire (or fired but the team-filtered
+  // candidates didn't include the right SKU at the top), the customer
+  // photo may still match a product elsewhere in the catalog by visual
+  // similarity. Run the deterministic hash scan against the WHOLE tenant
+  // catalog before falling through to the generic LLM matcher. This is
+  // what catches a "Brazil WC26 Special Edition" sitting at row #11 of
+  // a Brazil-text-rank list.
+  const tenantIdForSweep = mappings[0]?.tenantId ?? "";
+  if (tenantIdForSweep) {
+    const visualSweep = await pickCandidateByCustomerImage({
+      customerImageBase64: imageBase64,
+      customerImageUrl: args.imageUrl ?? null,
+      tenantId: tenantIdForSweep,
+      candidates: [],
+      validSkus,
+    }).catch((e) => {
+      logger.warn({ e: String(e) }, "Full-catalog visual sweep failed");
+      return null;
+    });
+    if (visualSweep) {
+      const sweepLabel = (visualSweep.facebookLabel ?? visualSweep.clientSku).trim();
+      return { row: visualSweep, teamLabel: teamLabel || sweepLabel };
     }
   }
 
@@ -4569,6 +4604,7 @@ export async function handleInboundMessengerMessage(params: {
         const visuallyPicked = await pickCandidateByCustomerImage({
           customerImageBase64: imagesB64[0],
           customerImageUrl: imageUrlList[0] ?? null,
+          tenantId: params.tenantId,
           candidates,
           validSkus: new Set(mappings.map((m) => m.clientSku)),
         }).catch((e) => {
