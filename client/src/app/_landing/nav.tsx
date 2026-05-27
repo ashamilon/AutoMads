@@ -41,13 +41,13 @@ export function LandingNav() {
             <img
               src={brandLogoUrl}
               alt="Brand logo"
-              className="h-7 w-7 rounded-lg object-contain brightness-0 invert"
+              className="h-9 w-9 rounded-lg object-contain brightness-0 invert"
             />
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={brandNameUrl}
               alt="Brand name"
-              className="h-4 w-auto max-w-[7rem] object-contain brightness-0 invert"
+              className="h-5 w-auto max-w-[9rem] object-contain brightness-0 invert"
             />
             <span className="ml-1.5 hidden items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-wider text-emerald-300 sm:inline-flex">
               <span className="h-1 w-1 animate-pulse rounded-full bg-emerald-400" /> Live

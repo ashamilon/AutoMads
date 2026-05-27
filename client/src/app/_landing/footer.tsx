@@ -31,13 +31,13 @@ export function LandingFooter() {
               <img
                 src={brandLogoUrl}
                 alt="Brand logo"
-                className="h-7 w-7 rounded-md object-contain brightness-0 invert"
+                className="h-9 w-9 rounded-md object-contain brightness-0 invert"
               />
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={brandNameUrl}
                 alt="Brand name"
-                className="h-5 w-auto max-w-[8rem] object-contain brightness-0 invert"
+                className="h-6 w-auto max-w-[10rem] object-contain brightness-0 invert"
               />
             </Link>
             <p className="mt-4 max-w-sm text-[12.5px] leading-relaxed text-slate-400">

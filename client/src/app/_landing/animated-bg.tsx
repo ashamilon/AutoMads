@@ -68,23 +68,6 @@ export function AnimatedBg() {
         transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }}
       />
 
-      {/* Layer 4 — drifting vertical light beam */}
-      <motion.div
-        aria-hidden="true"
-        className="absolute -top-10 bottom-0 w-[3px]"
-        style={{
-          background:
-            "linear-gradient(to bottom, transparent 0%, rgba(196,181,253,0.65) 30%, rgba(196,181,253,0.25) 70%, transparent 100%)",
-          filter: "blur(0.5px)",
-        }}
-        animate={
-          prefersReducedMotion
-            ? { left: "62%" }
-            : { left: ["12%", "78%", "24%", "62%", "12%"] }
-        }
-        transition={{ duration: 28, repeat: Infinity, ease: "linear" }}
-      />
-
       {/* Layer 5 — top hairline */}
       <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-violet-300/30 to-transparent" />
     </div>

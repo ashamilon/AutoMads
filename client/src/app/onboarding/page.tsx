@@ -304,12 +304,12 @@ export default function OnboardingPage() {
           <img
             src={brandLogoUrl}
             alt="Brand logo"
-            className="h-12 w-12 rounded-xl object-contain brightness-0 invert"
+            className="h-[3.75rem] w-[3.75rem] rounded-xl object-contain brightness-0 invert"
           />
           <img
             src={brandNameUrl}
             alt="Brand name"
-            className="h-7 w-auto max-w-[12rem] object-contain brightness-0 invert"
+            className="h-9 w-auto max-w-[15rem] object-contain brightness-0 invert"
           />
         </div>
 

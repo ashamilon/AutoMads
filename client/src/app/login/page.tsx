@@ -69,8 +69,8 @@ export default function LoginPage() {
         <Card className="border-white/10 p-8">
           <div className="mb-8 text-center">
             <div className="mx-auto mb-4 flex items-center justify-center gap-2">
-              <img src={brandLogoUrl} alt="Brand logo" className="h-12 w-12 rounded-xl object-contain sm:h-14 sm:w-14 brightness-0 invert" />
-              <img src={brandNameUrl} alt="Brand name" className="h-6 w-auto max-w-[10rem] object-contain sm:h-7 sm:max-w-[11rem] brightness-0 invert" />
+              <img src={brandLogoUrl} alt="Brand logo" className="h-[3.75rem] w-[3.75rem] rounded-xl object-contain sm:h-[4.375rem] sm:w-[4.375rem] brightness-0 invert" />
+              <img src={brandNameUrl} alt="Brand name" className="h-[1.875rem] w-auto max-w-[12.5rem] object-contain sm:h-[2.1875rem] sm:max-w-[13.75rem] brightness-0 invert" />
             </div>
             <h1 className="font-display text-display-sm font-bold text-balance text-white">Sign in</h1>
             <p className="mt-3 text-sm font-medium leading-relaxed text-slate-500">
