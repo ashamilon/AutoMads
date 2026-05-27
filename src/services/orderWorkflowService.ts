@@ -26,6 +26,7 @@ import {
   findBestCatalogMatchByText,
   pickTeamEmoji,
 } from "./catalogReplyService.js";
+import { matchCustomerPhotoAgainstCatalog } from "./photoMatchService.js";
 import {
   buildBanglishCartLinesUpdateReply,
   buildBanglishCartShowReply,
@@ -562,11 +563,79 @@ function buildVisualCandidateDescriptors(m: ProductMapping): string {
 
 async function pickCandidateByCustomerImage(args: {
   customerImageBase64: string;
+  /** Original Messenger CDN / data URL — used by `photoMatchService` for the URL-equality shortcut. */
+  customerImageUrl?: string | null;
   candidates: ProductMapping[];
   validSkus: Set<string>;
 }): Promise<ProductMapping | null> {
   const top = args.candidates.slice(0, 6);
   if (top.length === 0) return null;
+
+  // ── Stage 1+2: deterministic match (URL equality / perceptual hash) ──
+  // Runs locally — no LLM round-trip — and short-circuits when the
+  // customer reused our own marketing image (very common). Falls through
+  // to the LLM visual comparison only when neither shortcut succeeds.
+  const customerBuffer = Buffer.from(args.customerImageBase64, "base64");
+  if (customerBuffer.length >= 256) {
+    try {
+      const outcome = await matchCustomerPhotoAgainstCatalog({
+        customerImage: customerBuffer,
+        customerImageUrl: args.customerImageUrl ?? null,
+        candidates: top,
+      });
+
+      if (
+        outcome.kind === "exact_url" ||
+        outcome.kind === "exact_cloudinary" ||
+        outcome.kind === "near_exact_hash"
+      ) {
+        logger.info(
+          {
+            event: "photo_match_deterministic",
+            kind: outcome.kind,
+            sku: outcome.sku,
+            distance: outcome.hammingDistance,
+          },
+          "photoMatch: deterministic match",
+        );
+        return outcome.row;
+      }
+
+      // No deterministic match — feed the LLM the BEST-angle photo per
+      // candidate (smallest hash distance) instead of always the first
+      // photo. Dramatically improves auto-pick rate for products with
+      // multiple photos when the customer's angle differs from photo #1.
+      if (outcome.kind === "ranked" && outcome.ranked.length > 0) {
+        const enriched = outcome.ranked.map((r) => ({
+          sku: r.row.clientSku,
+          label: (r.row.facebookLabel ?? String(mappingMeta(r.row)["name"] ?? r.row.clientSku)).trim(),
+          descriptors: buildVisualCandidateDescriptors(r.row) || undefined,
+          imageBase64: r.bestImageBase64,
+          row: r.row,
+        }));
+        if (enriched.length === 1) return enriched[0]!.row;
+        const picked = await pickCatalogByVisualComparison({
+          customerImageBase64: args.customerImageBase64,
+          candidates: enriched.map((e) => ({
+            clientSku: e.sku,
+            label: e.label,
+            descriptors: e.descriptors,
+            imageBase64: e.imageBase64,
+          })),
+          validSkus: args.validSkus,
+        });
+        if (!picked) return null;
+        return enriched.find((e) => e.sku === picked)?.row ?? null;
+      }
+    } catch (e) {
+      // photoMatchService threw (network, sharp, etc.) — swallow and fall
+      // back to the legacy first-photo path so a transient failure can
+      // never fully disable image matching.
+      logger.warn({ e: String(e) }, "photoMatchService failed; falling back to first-photo path");
+    }
+  }
+
+  // ── Legacy fallback: only first photo per candidate ───────────────
   const enriched: Array<{
     sku: string;
     label: string;
@@ -626,6 +695,8 @@ type PerPhotoCatalogMatch = {
  */
 async function resolveBestCatalogMatchForSingleCustomerImage(args: {
   imageBase64: string;
+  /** Original Messenger CDN URL for this photo, used by the URL-equality shortcut. */
+  imageUrl?: string | null;
   mappings: ProductMapping[];
   catalogLines: string;
   validSkus: Set<string>;
@@ -698,6 +769,7 @@ async function resolveBestCatalogMatchForSingleCustomerImage(args: {
     if (candidates.length >= 2) {
       const visuallyPicked = await pickCandidateByCustomerImage({
         customerImageBase64: imageBase64,
+        customerImageUrl: args.imageUrl ?? null,
         candidates,
         validSkus,
       }).catch((e) => {
@@ -741,6 +813,8 @@ async function resolveBestCatalogMatchForSingleCustomerImage(args: {
 
 async function resolveCatalogMatchesPerCustomerPhoto(args: {
   imagesB64: string[];
+  /** Original Messenger CDN URLs aligned with `imagesB64` indices. */
+  imageUrls?: string[];
   mappings: ProductMapping[];
   catalogLines: string;
   validSkus: Set<string>;
@@ -752,6 +826,7 @@ async function resolveCatalogMatchesPerCustomerPhoto(args: {
     const imageBase64 = args.imagesB64[i]!;
     const hit = await resolveBestCatalogMatchForSingleCustomerImage({
       imageBase64,
+      imageUrl: args.imageUrls?.[i] ?? null,
       mappings: args.mappings,
       catalogLines: args.catalogLines,
       validSkus: args.validSkus,
@@ -4244,6 +4319,7 @@ export async function handleInboundMessengerMessage(params: {
       const validSkusMulti = new Set(mappings.map((m) => m.clientSku));
       const perPhotoMatches = await resolveCatalogMatchesPerCustomerPhoto({
         imagesB64,
+        imageUrls: imageUrlList,
         mappings,
         catalogLines: catalogLinesMulti,
         validSkus: validSkusMulti,
@@ -4492,6 +4568,7 @@ export async function handleInboundMessengerMessage(params: {
       if (candidates.length >= 2 && imagesB64[0]) {
         const visuallyPicked = await pickCandidateByCustomerImage({
           customerImageBase64: imagesB64[0],
+          customerImageUrl: imageUrlList[0] ?? null,
           candidates,
           validSkus: new Set(mappings.map((m) => m.clientSku)),
         }).catch((e) => {
