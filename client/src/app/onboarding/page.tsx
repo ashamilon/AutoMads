@@ -309,7 +309,7 @@ export default function OnboardingPage() {
           <img
             src={brandNameUrl}
             alt="Brand name"
-            className="h-9 w-auto max-w-[15rem] object-contain brightness-0 invert"
+            className="h-[2.5875rem] w-auto max-w-[17.25rem] object-contain brightness-0 invert"
           />
         </div>
 

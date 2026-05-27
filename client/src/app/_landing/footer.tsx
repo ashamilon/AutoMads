@@ -37,7 +37,7 @@ export function LandingFooter() {
               <img
                 src={brandNameUrl}
                 alt="Brand name"
-                className="h-6 w-auto max-w-[10rem] object-contain brightness-0 invert"
+                className="h-[1.725rem] w-auto max-w-[11.5rem] object-contain brightness-0 invert"
               />
             </Link>
             <p className="mt-4 max-w-sm text-[12.5px] leading-relaxed text-slate-400">

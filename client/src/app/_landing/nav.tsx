@@ -47,7 +47,7 @@ export function LandingNav() {
             <img
               src={brandNameUrl}
               alt="Brand name"
-              className="h-5 w-auto max-w-[9rem] object-contain brightness-0 invert"
+              className="h-[1.4375rem] w-auto max-w-[10.35rem] object-contain brightness-0 invert"
             />
             <span className="ml-1.5 hidden items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-wider text-emerald-300 sm:inline-flex">
               <span className="h-1 w-1 animate-pulse rounded-full bg-emerald-400" /> Live

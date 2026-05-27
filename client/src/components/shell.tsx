@@ -144,7 +144,7 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
           <img
             src={brandNameUrl}
             alt="Brand name"
-            className="h-8 w-auto max-w-[12rem] object-contain brightness-0 invert"
+            className="h-[2.3rem] w-auto max-w-[13.8rem] object-contain brightness-0 invert"
           />
           <div className="truncate text-[11px] font-medium text-slate-500">
             {tenant?.name || "Workspace"}
