@@ -11,7 +11,7 @@
  *   - Mobile collapses to a single stacked column.
  */
 
-import { Github, Mail, Twitter } from "lucide-react";
+import { Mail, Twitter } from "lucide-react";
 import Link from "next/link";
 import { getBrandLogoUrl, getBrandNameUrl } from "@/lib/branding";
 import { WHATSAPP_NUMBER_DISPLAY, buildWhatsAppUrl } from "@/lib/contact";
@@ -87,16 +87,6 @@ export function LandingFooter() {
                   className="inline-flex items-center gap-2 transition hover:text-white"
                 >
                   <Mail className="h-3.5 w-3.5 text-slate-500" /> hello@aicommos.com
-                </a>
-              </li>
-              <li>
-                <a
-                  href="https://github.com/ashamilon/AutoMads"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-2 transition hover:text-white"
-                >
-                  <Github className="h-3.5 w-3.5 text-slate-500" /> GitHub
                 </a>
               </li>
               <li>
