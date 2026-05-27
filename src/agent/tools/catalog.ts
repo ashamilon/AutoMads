@@ -187,15 +187,42 @@ export const catalogTools: ToolDef[] = [
       );
       const ambiguous = ranked.length > 1 && close >= 2 && hasDistinctive && !topOwnsDistinctive;
 
+      // Load tenant settings ONCE so we can surface a per-row add-on summary
+      // alongside the catalog hits. Without this, the LLM only sees the row
+      // labels and prices and can hallucinate name+number / customisation
+      // when the merchant has it disabled. After this change, every row in
+      // the search summary either reads `addons=none` or explicitly lists
+      // the resolved add-ons and prices — same source of truth as
+      // `get_product_details` and `list_addons`.
+      const tenantForAddons = await prisma.tenant
+        .findUnique({
+          where: { id: ctx.input.tenantId },
+          select: { settings: true },
+        })
+        .catch(() => null);
+      const settingsForAddons = parseTenantSettings(tenantForAddons?.settings);
+
       const summary = ranked
-        .map(
-          (r, i) =>
-            `${i + 1}. [${r.sku}] ${r.label} — ${
-              r.priceBdt != null ? `${r.priceBdt} BDT` : "price n/a"
-            }${r.stock != null ? `, stock=${r.stock}` : ""}${
-              r.sizes.length ? `, sizes=${r.sizes.join("/")}` : ""
-            }${r.isActive ? "" : " (INACTIVE)"}`,
-        )
+        .map((r, i) => {
+          const rowForAddons = rows.find((x) => x.clientSku === r.sku);
+          const resolvedAddons = rowForAddons
+            ? resolveProductAddons({
+                productMetadata: rowForAddons.metadata,
+                tenantSettings: settingsForAddons,
+              })
+            : [];
+          const addonsBit =
+            resolvedAddons.length === 0
+              ? ", addons=none"
+              : `, addons=${resolvedAddons
+                  .map((a) => `${a.label}${a.free ? "(FREE)" : ` +${a.priceBdt}BDT`}`)
+                  .join(",")}`;
+          return `${i + 1}. [${r.sku}] ${r.label} — ${
+            r.priceBdt != null ? `${r.priceBdt} BDT` : "price n/a"
+          }${r.stock != null ? `, stock=${r.stock}` : ""}${
+            r.sizes.length ? `, sizes=${r.sizes.join("/")}` : ""
+          }${r.isActive ? "" : " (INACTIVE)"}${addonsBit}`;
+        })
         .join("\n");
 
       const observation = ambiguous

@@ -364,6 +364,74 @@ function applyAntiHallucinationPass(text: string, haystack: string): FilterReply
 }
 
 /**
+ * Pass 2b — add-on grounding.
+ *
+ * The agent regularly hallucinates add-on availability ("name + number hobe"
+ * for products that don't accept it, or worse, "hobe na" for ones that do).
+ * The catalog `addons=…` field on every `search_catalog` / `get_product_details`
+ * observation is the single source of truth — when it appears in a verified
+ * tool result for THIS turn, we trust the LLM's add-on claim. When it
+ * doesn't, we suppress both directions of the claim and substitute a
+ * non-committal "ektu check kore janachhi" hedge so the agent never tells
+ * the customer something the catalog can't back up.
+ *
+ * Patterns we catch (case-insensitive, Banglish + English):
+ *   - positive  : "name + number hobe", "name number korte parben", "customisation kora jabe"
+ *   - negative  : "name + number hobe na", "name number nai", "customisation hoy na"
+ *
+ * Heuristic for "grounded": haystack contains either `addons=` followed by
+ * something other than `none`, OR an explicit `name-number` / `name+number`
+ * token. That covers both add-ons resolved into search-catalog summaries and
+ * the `list_addons` / `get_product_details` responses.
+ */
+const ADDON_CLAIM_PATTERNS: RegExp[] = [
+  // "name + number" or "name number" (with optional hobe/korte parben/etc)
+  /\bname\s*\+?\s*number(?:\s+(?:hobe(?:\s+na)?|korte\s+parben|kora\s+jabe(?:\s+na)?|nai))?/gi,
+  // "customisation / customization / custom" claims
+  /\bcustom(?:isation|ization)?(?:\s+(?:hobe(?:\s+na)?|kora\s+jabe(?:\s+na)?|hoy(?:\s+na)?))/gi,
+];
+
+const ADDON_NEUTRAL_HEDGE =
+  "Ekto check kore jananchi — ei product e ki ki add-on ache, ekhuni dekhe bolchi.";
+
+function applyAddonGroundingPass(text: string, haystack: string): FilterReplyResult {
+  if (!text) return { text, overrides: [] };
+
+  // Quick exit: if the reply doesn't mention add-on terms, nothing to do.
+  const mentionsAddon = ADDON_CLAIM_PATTERNS.some((rx) => {
+    rx.lastIndex = 0;
+    return rx.test(text);
+  });
+  if (!mentionsAddon) return { text, overrides: [] };
+
+  // Grounding signal: tool observations contain `addons=…` (anything other
+  // than `none`) OR an explicit name-number / customisation token.
+  const hayLower = haystack.toLowerCase();
+  const haystackHasAddon =
+    /\baddons=(?!none)\S/i.test(haystack) ||
+    hayLower.includes("name-number") ||
+    hayLower.includes("name+number") ||
+    hayLower.includes("name + number") ||
+    hayLower.includes("customisation") ||
+    hayLower.includes("customization");
+
+  // Grounding signal: tool observations contain `addons=none` for the same
+  // SKU. When this is present and the customer's question was negative
+  // ("hobe na?"), the LLM CAN truthfully say "hobe na" — but we can't tell
+  // sku alignment from text alone, so we conservatively still hedge unless
+  // the haystack also has positive add-on tokens. False-negative-rate cost:
+  // the agent occasionally hedges instead of saying "hobe na" outright; the
+  // alternative (silently passing through "hobe na" claims) lets the
+  // hallucination through. We pick safety.
+  if (haystackHasAddon) return { text, overrides: [] };
+
+  return {
+    text: ADDON_NEUTRAL_HEDGE,
+    overrides: [{ kind: "anti_hallucination", attribute: "addon", value: text.slice(0, 160) }],
+  };
+}
+
+/**
  * Pass 3 — confirmation block. If the reply claims the order is confirmed but
  * no `create_order` step succeeded this turn, replace the entire reply with the
  * pre-confirmation prompt. Returning the matched phrase gives task 10.2 a
@@ -489,6 +557,12 @@ export function filterReply(
   const antiHall = applyAntiHallucinationPass(working, haystack);
   working = antiHall.text;
   overrides.push(...antiHall.overrides);
+
+  // Pass 2b — add-on grounding (catches name+number / customisation claims
+  // that aren't backed by an `addons=` tool observation this turn).
+  const addonGuard = applyAddonGroundingPass(working, haystack);
+  working = addonGuard.text;
+  overrides.push(...addonGuard.overrides);
 
   // Pass 3 — confirmation block. May replace the whole reply.
   const confirm = applyConfirmationBlockPass(working, traceSteps);
