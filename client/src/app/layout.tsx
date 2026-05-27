@@ -31,9 +31,19 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="dark">
+    // `suppressHydrationWarning` on <html> + <body> silences the noisy
+    // hydration warning that fires when a browser extension (Grammarly,
+    // LanguageTool, Compose AI, Honey, etc.) injects attributes like
+    // `data-new-gr-c-s-check-loaded`, `data-gr-ext-installed`, or
+    // `cz-shortcut-listen` onto these elements BEFORE React hydrates.
+    // The warning is otherwise misleading — it points at the first
+    // sibling diff (in our case the footer's <li>) rather than the
+    // real root cause. The flag only suppresses the diff at this exact
+    // element; React still validates and warns on every other node.
+    <html lang="en" className="dark" suppressHydrationWarning>
       <body
         className={`${fontDisplay.variable} ${fontSans.variable} ${fontMono.variable} font-sans`}
+        suppressHydrationWarning
       >
         <TenantProvider>{children}</TenantProvider>
       </body>
