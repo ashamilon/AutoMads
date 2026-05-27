@@ -210,6 +210,20 @@ export const tenantSettingsSchema = z
           aliases: z.array(z.string().min(1).max(60)).max(20).optional(),
           /** Optional grouping like "customization", "premium", "shipping". Used for filtering by the agent. */
           category: z.string().max(40).optional(),
+          /**
+           * Optional gallery photos for the add-on itself (e.g. the
+           * Official Font sample sheet, a "patches" image, a name+number
+           * preview). When present, the agent dispatches these via the
+           * `send_addon_photos` tool whenever a customer asks "add-on er
+           * chobi den" / "name number er sample dekhao". Each entry must
+           * be a fully-qualified https URL pointing to a public image —
+           * Cloudinary, the merchant's own CDN, or a Messenger-friendly
+           * upload host. Capped at 6 per add-on so the agent never spams.
+           */
+          imageUrls: z
+            .array(z.string().url().max(500))
+            .max(6)
+            .optional(),
         }),
       )
       .max(80)

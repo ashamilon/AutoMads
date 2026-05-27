@@ -14,6 +14,7 @@ import { orderTools } from "./orders.js";
 import { paymentTools } from "./payment.js";
 import { paymentLinkTools } from "./paymentLink.js";
 import { photoTools } from "./photos.js";
+import { addonPhotoTools } from "./addonPhotos.js";
 import { policyTools } from "./policy.js";
 import { replyTools } from "./reply.js";
 import { resolveTools } from "./resolve.js";
@@ -131,6 +132,7 @@ export const TOOLS: ToolDef[] = wrapToolHandlersWithTenantGuard([
   ...resolveTools,
   ...sizeChartTools,
   ...photoTools,
+  ...addonPhotoTools,
   ...policyTools,
   ...verifyTools,
   ...cartTools,

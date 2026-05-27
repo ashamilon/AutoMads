@@ -167,6 +167,7 @@ export const policyTools: ToolDef[] = [
         description?: string;
         aliases?: string[];
         category?: string;
+        imageUrls?: string[];
         overridden?: boolean;
       }> = [];
       let scopeNote = "tenant-wide";
@@ -198,6 +199,7 @@ export const policyTools: ToolDef[] = [
             ...(a.description != null ? { description: a.description } : {}),
             ...(a.aliases != null ? { aliases: a.aliases } : {}),
             ...(a.category != null ? { category: a.category } : {}),
+            ...(a.imageUrls != null && a.imageUrls.length > 0 ? { imageUrls: a.imageUrls } : {}),
           }));
       }
 
@@ -229,7 +231,11 @@ export const policyTools: ToolDef[] = [
           const cat = a.category ? ` category=${a.category}` : "";
           const desc = a.description?.trim() ? ` desc=${a.description.trim().slice(0, 120)}` : "";
           const ov = a.overridden ? " (per-product override)" : "";
-          return `- ${a.label} (id=${a.id}): ${price}${ov}${cat}${aliases}${desc}`;
+          const photos =
+            a.imageUrls && a.imageUrls.length > 0
+              ? ` photos=${a.imageUrls.length} (use send_addon_photos {label:"${a.label}"} to share)`
+              : " photos=none";
+          return `- ${a.label} (id=${a.id}): ${price}${ov}${cat}${aliases}${desc}${photos}`;
         })
         .join("\n");
       return {

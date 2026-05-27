@@ -9,6 +9,8 @@ export type ResolvedAddon = {
   description?: string;
   aliases?: string[];
   category?: string;
+  /** Optional gallery photos uploaded by the merchant (capped at 6). */
+  imageUrls?: string[];
   /** True when this came from a per-product override rather than the tenant default. */
   overridden?: boolean;
 };
@@ -74,6 +76,7 @@ function applyAddon(raw: RawAddon, override: Override | undefined): ResolvedAddo
   if (raw.description) out.description = raw.description;
   if (raw.aliases && raw.aliases.length > 0) out.aliases = raw.aliases.slice();
   if (raw.category) out.category = raw.category;
+  if (raw.imageUrls && raw.imageUrls.length > 0) out.imageUrls = raw.imageUrls.slice();
   if (override) out.overridden = true;
   return out;
 }

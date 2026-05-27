@@ -59,6 +59,8 @@ type AddOn = {
   aliases?: string[];
   /** Optional grouping like "customization", "premium", "shipping". */
   category?: string;
+  /** Optional gallery photos for the add-on (capped at 6). */
+  imageUrls?: string[];
 };
 
 type ManualPaymentAdminLog = {
@@ -1068,6 +1070,56 @@ export default function SettingsPage() {
                           className={inputCls}
                         />
                       </Field>
+                    </div>
+                    <div className="mt-3">
+                      <Field
+                        label="Add-on photos (one URL per line — up to 6)"
+                        hint="Public image URLs. Customers asking 'name number er chobi den' / 'patches er sample' get these sent automatically. Use Cloudinary, your CDN, or any https image host."
+                      >
+                        <textarea
+                          value={(a.imageUrls ?? []).join("\n")}
+                          onChange={(e) =>
+                            updateAddOns((prev) =>
+                              prev.map((x, i) =>
+                                i === idx
+                                  ? {
+                                      ...x,
+                                      imageUrls: e.target.value
+                                        .split(/\r?\n/)
+                                        .map((s) => s.trim())
+                                        .filter((s) => s.startsWith("http://") || s.startsWith("https://"))
+                                        .slice(0, 6),
+                                    }
+                                  : x,
+                              ),
+                            )
+                          }
+                          placeholder={
+                            "https://res.cloudinary.com/.../name-number-sample-1.jpg\nhttps://res.cloudinary.com/.../name-number-sample-2.jpg"
+                          }
+                          rows={3}
+                          className={`${inputCls} font-mono text-[11px]`}
+                        />
+                      </Field>
+                      {a.imageUrls && a.imageUrls.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {a.imageUrls.slice(0, 6).map((url, i) => (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              key={`${url}-${i}`}
+                              src={url}
+                              alt={`add-on photo ${i + 1}`}
+                              className="h-14 w-14 rounded-md border border-white/[0.08] bg-black/30 object-cover"
+                              onError={(ev) => {
+                                (ev.currentTarget as HTMLImageElement).style.display = "none";
+                              }}
+                            />
+                          ))}
+                          <span className="self-center text-[11px] text-slate-500">
+                            {a.imageUrls.length}/6 photo{a.imageUrls.length === 1 ? "" : "s"}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
