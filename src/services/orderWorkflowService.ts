@@ -775,6 +775,9 @@ async function resolveBestCatalogMatchForSingleCustomerImage(args: {
       return { row: candidates[0]!, teamLabel };
     }
     if (candidates.length >= 2) {
+      // Try the team-narrowed visual compare first (cheap — only fingerprints
+      // the team-filtered candidates' photos). When it succeeds with a
+      // deterministic match (URL/Cloudinary/near-exact hash), we're done.
       const visuallyPicked = await pickCandidateByCustomerImage({
         customerImageBase64: imageBase64,
         customerImageUrl: args.imageUrl ?? null,
@@ -786,8 +789,16 @@ async function resolveBestCatalogMatchForSingleCustomerImage(args: {
         return null;
       });
       if (visuallyPicked) return { row: visuallyPicked, teamLabel };
-      const textBest = findBestCatalogMatchByText(candidates, teamLabel || visionNames.join(" "));
-      if (textBest) return { row: textBest, teamLabel };
+
+      // CRITICAL: do NOT fall back to `findBestCatalogMatchByText` here.
+      // That picks the highest-stock team row, which is the *popular*
+      // jersey, not the one the customer actually photographed. Letting
+      // it return would silently overwrite the customer's intent (e.g.
+      // a customer photographing the "Brazil WC26 Special Edition" but
+      // getting handed the "Brazil WC26 Away Player" because that row
+      // ranks higher by stock). Instead we drop through to the full-
+      // catalog visual sweep below, and if THAT also fails, the LLM
+      // matcher / clarifier handles ambiguity properly.
     }
   }
 
@@ -4570,22 +4581,62 @@ export async function handleInboundMessengerMessage(params: {
         // contextually (e.g. acknowledging a previous order screenshot or
         // answering a question shown in a chat clip).
       } else {
-        const catalogMatchCaption = useVisionCaption
-          ? [trimmed, `Jersey in photo (identified): ${visionNames.join(", ")}`].filter(Boolean).join(" | ")
-          : trimmed || undefined;
-        const matchedSku = await matchClientSkuFromCatalog({
-          catalogLines,
-          text: catalogMatchCaption,
-          imagesBase64: imagesB64,
-          validSkus,
-        });
-        row =
-          (matchedSku ? mappings.find((m) => m.clientSku === matchedSku) : undefined) ??
-          (matchedSku
-            ? await prisma.productMapping.findFirst({
-                where: { tenantId: params.tenantId, clientSku: matchedSku },
-              })
-            : null);
+        // ── Photo-first matching: run the deterministic perceptual-hash
+        //    sweep BEFORE the LLM-based catalog text matcher. The LLM
+        //    matcher pattern-matches on jersey vision text + catalog
+        //    text, which silently picks the most popular team row even
+        //    when the customer's actual photographed product is a
+        //    lower-stock special edition. The hash sweep, by contrast,
+        //    compares the exact pixels of the customer photo against
+        //    every cached photo in the catalog — so a "Brazil WC26
+        //    Special Edition" sitting at row #11 by stock rank still
+        //    wins as long as one of its cached photos hashes near the
+        //    customer image.
+        let photoMatched: ProductMapping | null = null;
+        if (hasIncomingImages && imagesB64[0]) {
+          photoMatched = await pickCandidateByCustomerImage({
+            customerImageBase64: imagesB64[0],
+            customerImageUrl: imageUrlList[0] ?? null,
+            tenantId: params.tenantId,
+            // Pass the team-narrowed list ONLY for the URL/Cloudinary
+            // shortcut (it's cheap to walk). The hash sweep itself
+            // ignores this and runs against the full tenant catalog.
+            candidates:
+              jerseyVision && jerseyVision.kind !== "not_jersey" && (jerseyVision.primaryNames?.length ?? 0) > 0
+                ? findCatalogByJerseyEntities(mappings, jerseyVision.primaryNames, MAX_CATALOG_OPTION_LIST)
+                : [],
+            validSkus,
+          }).catch((e) => {
+            logger.warn({ e: String(e) }, "Photo-first hash sweep failed");
+            return null;
+          });
+          if (photoMatched) {
+            logger.info(
+              { event: "photo_first_match_won", sku: photoMatched.clientSku },
+              "photo-first match overrode the LLM catalog matcher",
+            );
+            row = photoMatched;
+          }
+        }
+
+        if (!row) {
+          const catalogMatchCaption = useVisionCaption
+            ? [trimmed, `Jersey in photo (identified): ${visionNames.join(", ")}`].filter(Boolean).join(" | ")
+            : trimmed || undefined;
+          const matchedSku = await matchClientSkuFromCatalog({
+            catalogLines,
+            text: catalogMatchCaption,
+            imagesBase64: imagesB64,
+            validSkus,
+          });
+          row =
+            (matchedSku ? mappings.find((m) => m.clientSku === matchedSku) : undefined) ??
+            (matchedSku
+              ? await prisma.productMapping.findFirst({
+                  where: { tenantId: params.tenantId, clientSku: matchedSku },
+                })
+              : null);
+        }
       }
     }
 

@@ -77,10 +77,26 @@ export type PhotoMatchOutcome =
 
 /** Per-product photo fingerprint count cap. Avoids unbounded fetches on noisy catalogs. */
 const MAX_PHOTOS_PER_PRODUCT = 8;
-/** Hamming distance ≤ this → treat as the same image (auto-pick). */
-const NEAR_EXACT_THRESHOLD = 8;
-/** Hamming distance ≤ this → "similar enough to feed to the LLM". */
-const SIMILAR_THRESHOLD = 16;
+/**
+ * Hamming distance ≤ this → treat as the same image (auto-pick).
+ *
+ * 8/64 bits ≈ 12.5% disagreement. A merchant's marketing photo re-encoded
+ * by Messenger compression typically lands at 4-10 bits; the same product
+ * shot from a slightly different angle by the customer can land at 8-16.
+ * We want the auto-pick to fire on both — Messenger compression AND
+ * "customer holding their own copy of the same product". 14 was chosen
+ * empirically: tighter than 16 (which catches similar-looking-but-
+ * different SKUs) but loose enough to catch angle / lighting variations
+ * of the same SKU.
+ */
+const NEAR_EXACT_THRESHOLD = 14;
+/**
+ * Hamming distance ≤ this → "similar enough to feed to the LLM".
+ *
+ * The LLM gets the per-candidate best-angle photo and a short list of
+ * candidates so it can pick from a richer signal than just text.
+ */
+const SIMILAR_THRESHOLD = 22;
 /** How many ranked products to forward to the LLM when no auto-pick fires. */
 const LLM_FALLBACK_TOP_K = 4;
 
@@ -435,6 +451,24 @@ export async function matchCustomerPhotoAgainstCatalog(args: {
 
   scored.sort((a, b) => a.bestDistance - b.bestDistance);
   const top1 = scored[0]!;
+
+  // Diagnostic: log the top-3 distances + SKUs so the operator can see
+  // exactly what the hash sweep saw. Useful when the auto-pick doesn't
+  // fire and the operator wants to know whether the right SKU was even
+  // close on the leaderboard.
+  logger.info(
+    {
+      event: "photo_match_leaderboard",
+      catalogScanned: allRows.length,
+      top: scored.slice(0, 3).map((s) => ({
+        sku: s.row.clientSku,
+        label: (s.row.facebookLabel ?? s.row.clientSku).trim(),
+        distance: s.bestDistance,
+        url: s.bestUrl,
+      })),
+    },
+    "photoMatch: top-3 candidates after full-catalog hash sweep",
+  );
 
   // ── Stage 2a — near-exact auto-pick ───────────────────────────────
   if (top1.bestDistance <= NEAR_EXACT_THRESHOLD) {
