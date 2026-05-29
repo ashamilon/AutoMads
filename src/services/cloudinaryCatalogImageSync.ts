@@ -279,7 +279,25 @@ async function fetchCloudinaryPage(
   return { resources, nextCursor: data.next_cursor };
 }
 
-/** Paginate through all image resources under optional prefix. */
+/**
+ * Paginate through all image resources matching the supplied folder.
+ *
+ * Cloudinary has two folder models that look identical in the Media Library
+ * but behave very differently on the Admin API:
+ *
+ *   1. **Public-ID prefix** (legacy "fixed folders"): the asset's `public_id`
+ *      is `<folder>/<id>` so a `prefix=<folder>` query finds them.
+ *   2. **Asset folder** (newer "dynamic folders"): the asset's `public_id`
+ *      stays at the root and the path lives in an `asset_folder` field.
+ *      A prefix query returns ZERO matches even though the Media Library
+ *      shows the photos inside the folder.
+ *
+ * Most production tenants today have the *dynamic-folder* model because
+ * that's what Cloudinary made the default in 2024. So we try the legacy
+ * prefix first, and if it comes back empty AND the caller supplied a
+ * folder, we re-list without a prefix and filter by `asset_folder` on
+ * the client. The full list is capped to 20k assets either way.
+ */
 export async function listAllCloudinaryImages(cfg: CloudinaryListConfig): Promise<CloudinaryAsset[]> {
   const all: CloudinaryAsset[] = [];
   let cursor: string | undefined;
@@ -289,7 +307,32 @@ export async function listAllCloudinaryImages(cfg: CloudinaryListConfig): Promis
     cursor = page.nextCursor;
     if (all.length > 20_000) break;
   } while (cursor);
-  return all;
+
+  const wantedFolder = (cfg.prefix ?? "").trim().replace(/^\/+|\/+$/g, "");
+  if (!wantedFolder || all.length > 0) {
+    return all;
+  }
+
+  // Prefix returned nothing — sweep without a prefix and filter by
+  // `asset_folder`. This catches the dynamic-folder case described above.
+  const fallback: CloudinaryAsset[] = [];
+  let cursor2: string | undefined;
+  const noPrefixCfg: CloudinaryListConfig = { ...cfg, prefix: "" };
+  do {
+    const page = await fetchCloudinaryPage(noPrefixCfg, cursor2);
+    fallback.push(...page.resources);
+    cursor2 = page.nextCursor;
+    if (fallback.length > 20_000) break;
+  } while (cursor2);
+
+  // Match `asset_folder` case-insensitively (Cloudinary preserves the user's
+  // casing but the operator may type it differently). Also accept exact
+  // sub-folder matches like `Photo_Post/sub`.
+  const wantedLower = wantedFolder.toLowerCase();
+  return fallback.filter((a) => {
+    const af = (a.assetFolder ?? "").trim().replace(/^\/+|\/+$/g, "").toLowerCase();
+    return af === wantedLower || af.startsWith(`${wantedLower}/`);
+  });
 }
 
 export type FolderImageGroup = {

@@ -17,6 +17,7 @@ import { clientRoutes } from "./routes/clientRoutes.js";
 import { tenantPortalRoutes } from "./routes/tenantPortalRoutes.js";
 import { onboardingRoutes } from "./routes/onboardingRoutes.js";
 import { billingRoutes } from "./routes/billingRoutes.js";
+import { facebookOAuthCallback } from "./controllers/facebookOAuthController.js";
 import { adminPanelRoutes } from "./routes/adminPanelRoutes.js";
 import { authAuthenticatedRoutes, authPublicRoutes } from "./routes/authRoutes.js";
 import { agentDebugRoutes } from "./routes/agentDebugRoutes.js";
@@ -108,6 +109,10 @@ export function createApp(): express.Application {
   app.use("/webhooks/steadfast", steadfastRoutes);
   app.use("/webhooks/telegram", telegramRoutes);
   app.use("/webhooks/client", clientRoutes);
+  // Public Facebook OAuth callback. Meta redirects the user's browser here
+  // after they consent in the popup; auth is handled via the signed `state`
+  // parameter, NOT a tenant API key (the user has no session at this point).
+  app.get("/oauth/facebook/callback", facebookOAuthCallback);
   app.use("/api/v1/auth", authPublicRoutes);
   app.use("/api/v1/auth", authAuthenticatedRoutes);
   app.use("/api/v1/billing", billingRoutes);

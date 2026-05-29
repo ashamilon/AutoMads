@@ -570,88 +570,12 @@ export default function SettingsPage() {
       <Tabs tabs={tabs} active={tab} onChange={(id) => setTab(id as TabId)} />
 
       {tab === "pages" && (
-        <Section
-          title="Connected Facebook Pages"
-          description="Manage which pages the bot responds to. Toggle a page off to stop the bot from replying on that page."
-        >
-          {/* Primary page */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-3">
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-white">Primary Page</p>
-                <p className="mt-0.5 truncate text-xs text-slate-500 font-mono">
-                  {tenant?.facebookPageId || "No page ID set (default page)"}
-                </p>
-              </div>
-              <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-[11px] font-medium text-emerald-300">
-                Always on
-              </span>
-            </div>
-
-            {/* Additional pages from settings.facebookPages */}
-            {Object.entries(settings.facebookPages ?? {}).map(([pageId, page]) => (
-              <div
-                key={pageId}
-                className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-white/[0.02] px-4 py-3"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-medium text-white">{page.label || "Unnamed Page"}</p>
-                    <span className={`h-2 w-2 rounded-full ${page.enabled !== false ? "bg-emerald-400" : "bg-slate-600"}`} />
-                  </div>
-                  <p className="mt-0.5 truncate text-xs text-slate-500 font-mono">{pageId}</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="text"
-                    value={page.label || ""}
-                    onChange={(e) => {
-                      setSettings((prev) => ({
-                        ...prev,
-                        facebookPages: {
-                          ...prev.facebookPages,
-                          [pageId]: { ...page, label: e.target.value },
-                        },
-                      }));
-                      setJson(JSON.stringify({ ...settings, facebookPages: { ...settings.facebookPages, [pageId]: { ...page, label: e.target.value } } }, null, 2));
-                    }}
-                    placeholder="Page name"
-                    className="w-32 rounded-lg border border-white/[0.08] bg-black/30 px-2.5 py-1.5 text-xs text-slate-200 placeholder:text-slate-600 focus:border-accent/40 focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const newEnabled = page.enabled === false;
-                      setSettings((prev) => ({
-                        ...prev,
-                        facebookPages: {
-                          ...prev.facebookPages,
-                          [pageId]: { ...page, enabled: newEnabled },
-                        },
-                      }));
-                      setJson(JSON.stringify({ ...settings, facebookPages: { ...settings.facebookPages, [pageId]: { ...page, enabled: newEnabled } } }, null, 2));
-                    }}
-                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                      page.enabled !== false ? "bg-emerald-500" : "bg-slate-700"
-                    }`}
-                  >
-                    <span
-                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform ${
-                        page.enabled !== false ? "translate-x-5" : "translate-x-0"
-                      }`}
-                    />
-                  </button>
-                </div>
-              </div>
-            ))}
-
-            {Object.keys(settings.facebookPages ?? {}).length === 0 && (
-              <p className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-sm text-slate-500">
-                No additional pages configured. Add pages via the Advanced JSON tab or contact support.
-              </p>
-            )}
-          </div>
-        </Section>
+        <FacebookConnectPanel
+          tenant={tenant}
+          settings={settings}
+          setSettings={setSettings}
+          setJson={setJson}
+        />
       )}
 
       {tab === "general" && (
@@ -2403,6 +2327,41 @@ function SocialAccountsSection({
     setIgValidating(false);
   };
 
+  // Auto-fill the IG User ID by reading the Instagram Business Account
+  // linked to the tenant's connected Facebook Page. Saves the operator
+  // from poking around Graph API Explorer manually.
+  const discoverInstagram = async () => {
+    setIgValidating(true);
+    setIgError("");
+    setIgStatus("idle");
+    try {
+      const res = await apiFetch<{
+        ok?: boolean;
+        error?: string;
+        igUserId?: string;
+        username?: string;
+      }>("/api/v1/social/discover-instagram", { method: "POST", body: "{}" });
+      if (res.ok && res.igUserId) {
+        setSettings((s: any) => ({
+          ...s,
+          instagram: {
+            ...(s?.instagram ?? {}),
+            igUserId: res.igUserId,
+            enabled: true,
+          },
+        }));
+        setIgStatus("ok");
+      } else {
+        setIgStatus("fail");
+        setIgError(res.error ?? "Discovery failed");
+      }
+    } catch (e: any) {
+      setIgStatus("fail");
+      setIgError(e?.message ?? "Discovery failed");
+    }
+    setIgValidating(false);
+  };
+
   const validateTiktok = async () => {
     if (!tiktokAccessToken.trim()) { setTiktokError("Enter your TikTok access token first"); setTiktokStatus("fail"); return; }
     setTiktokValidating(true);
@@ -2474,11 +2433,20 @@ function SocialAccountsSection({
                 className={inputCls}
               />
               <p className="mt-1.5 text-[11px] text-slate-500 leading-relaxed">
-                Go to <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener" className="text-indigo-400 hover:underline">Graph API Explorer</a> → select your Page token → run: <code className="bg-black/30 px-1 py-0.5 rounded text-[10px] text-indigo-300">GET /me?fields=instagram_business_account</code>
+                Click <strong className="text-slate-300">Discover from Page</strong> to auto-fill from your connected Facebook Page. The Instagram account must be linked under
+                <span className="whitespace-nowrap"> Facebook → Page Settings → Linked accounts.</span>
               </p>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                onClick={discoverInstagram}
+                disabled={igValidating}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-pink-500/10 border border-pink-500/30 text-pink-300 hover:bg-pink-500/20 transition disabled:opacity-50"
+              >
+                {igValidating ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plug className="w-3 h-3" />}
+                Discover from Page
+              </button>
               <button
                 onClick={validateInstagram}
                 disabled={igValidating}
@@ -2930,6 +2898,291 @@ function AdvancePolicyEditor({
           No advance — the bot will treat the full subtotal as payable now (legacy behaviour).
         </p>
       )}
+    </div>
+  );
+}
+
+// ─── Facebook + Instagram self-serve connect panel ────────────────────────
+//
+// Replaces the old "paste Page id + token" flow with a single
+// "Connect with Facebook" button that opens Meta's official login dialog
+// in a popup. After the user grants consent, our `/oauth/facebook/callback`
+// endpoint saves the Page id + non-expiring Page token + linked IG Business
+// Account id onto the tenant row, and the popup closes / redirects back
+// here with `?fbConnect=ok`.
+//
+// We avoid showing any technical details (tokens, IDs) by default — they
+// live behind a "Show details" toggle for operators who want to verify.
+
+type FbHealth =
+  | { ok: true; connected: true; page: { id: string; name: string; category?: string }; instagram: { igUserId: string; enabled: boolean } | null }
+  | { ok: false; connected: false; reason?: string; detail?: string };
+
+function FacebookConnectPanel({
+  tenant,
+  settings,
+  setSettings,
+  setJson,
+}: {
+  tenant: any;
+  settings: any;
+  setSettings: any;
+  setJson: any;
+}) {
+  const [health, setHealth] = useState<FbHealth | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [connecting, setConnecting] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
+  const [banner, setBanner] = useState<{ kind: "ok" | "error" | "cancelled"; message: string } | null>(null);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      const r = await apiFetch<FbHealth>("/api/v1/social/facebook/health", {
+        method: "GET",
+      });
+      setHealth(r);
+    } catch (e: any) {
+      setHealth({ ok: false, connected: false, reason: "fetch_failed", detail: String(e?.message ?? e) });
+    }
+    setLoading(false);
+  };
+
+  // Read `?fbConnect=...` set by the OAuth callback redirect, surface a banner,
+  // then strip the params from the URL so refresh doesn't re-trigger.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    const status = url.searchParams.get("fbConnect");
+    if (status) {
+      const reason = url.searchParams.get("reason") ?? "";
+      const page = url.searchParams.get("page") ?? "";
+      const ig = url.searchParams.get("ig") === "1";
+      if (status === "ok") {
+        setBanner({
+          kind: "ok",
+          message: `Connected${page ? ` to ${page}` : ""}${ig ? " — Instagram detected too" : ""}.`,
+        });
+      } else if (status === "cancelled") {
+        setBanner({ kind: "cancelled", message: "Connection cancelled. You can try again any time." });
+      } else {
+        setBanner({
+          kind: "error",
+          message: `Could not connect (${reason || "unknown error"}). Please try again.`,
+        });
+      }
+      url.searchParams.delete("fbConnect");
+      url.searchParams.delete("reason");
+      url.searchParams.delete("page");
+      url.searchParams.delete("ig");
+      window.history.replaceState({}, "", url.toString());
+    }
+    refresh();
+  }, []);
+
+  const startConnect = async () => {
+    setConnecting(true);
+    try {
+      const r = await apiFetch<{ ok: boolean; authorizeUrl?: string; error?: string }>(
+        "/api/v1/social/facebook/connect",
+        { method: "GET" },
+      );
+      if (r.ok && r.authorizeUrl) {
+        // Full-page redirect (not popup). Popups get aggressively blocked
+        // and the OAuth callback can't reliably postMessage back to a
+        // popup opener that lives on a different origin in production. A
+        // top-level redirect is more reliable and the user lands back on
+        // this same Settings page via our callback's `res.redirect(...)`.
+        window.location.href = r.authorizeUrl;
+      } else {
+        setBanner({
+          kind: "error",
+          message: r.error ?? "Could not start the connection. Please contact support.",
+        });
+        setConnecting(false);
+      }
+    } catch (e: any) {
+      setBanner({ kind: "error", message: String(e?.message ?? e) });
+      setConnecting(false);
+    }
+  };
+
+  const disconnect = async () => {
+    if (!confirm("Disconnect this Facebook Page? The bot will stop replying until you reconnect.")) {
+      return;
+    }
+    setLoading(true);
+    try {
+      await apiFetch("/api/v1/social/facebook/disconnect", { method: "POST", body: "{}" });
+      setBanner({ kind: "ok", message: "Disconnected." });
+      await refresh();
+    } catch (e: any) {
+      setBanner({ kind: "error", message: String(e?.message ?? e) });
+      setLoading(false);
+    }
+  };
+
+  const isConnected = health?.connected === true;
+  const igConnected = isConnected && health.instagram?.igUserId;
+
+  return (
+    <div className="space-y-6">
+      <Section
+        title="Connect Facebook & Instagram"
+        description="One click to connect — we'll handle the rest. Your Page replies, posts, and Instagram Business account all use the same secure connection."
+      >
+        {banner && (
+          <div
+            className={cn(
+              "mb-5 flex items-start gap-3 rounded-xl border px-4 py-3 text-sm",
+              banner.kind === "ok" && "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
+              banner.kind === "error" && "border-red-500/30 bg-red-500/10 text-red-200",
+              banner.kind === "cancelled" && "border-amber-500/30 bg-amber-500/10 text-amber-200",
+            )}
+          >
+            {banner.kind === "ok" && <CheckCircle2 className="h-4 w-4 mt-0.5" />}
+            <div className="flex-1">{banner.message}</div>
+            <button onClick={() => setBanner(null)} className="text-xs opacity-70 hover:opacity-100">
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex items-center gap-2 text-sm text-slate-400">
+            <Loader2 className="h-4 w-4 animate-spin" /> Checking connection…
+          </div>
+        ) : isConnected ? (
+          <div className="space-y-4">
+            {/* Connected state — happy path */}
+            <div className="flex items-start justify-between gap-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-5">
+              <div className="flex items-start gap-4 min-w-0 flex-1">
+                <div className="flex-shrink-0 w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center">
+                  <svg viewBox="0 0 24 24" className="w-6 h-6 text-white" fill="currentColor">
+                    <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
+                  </svg>
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-base font-semibold text-white truncate">{health.page.name}</h4>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-medium text-emerald-300">
+                      <CheckCircle2 className="h-3 w-3" /> Connected
+                    </span>
+                  </div>
+                  {health.page.category && (
+                    <p className="mt-0.5 text-xs text-slate-400">{health.page.category}</p>
+                  )}
+                  {igConnected && (
+                    <p className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-pink-300">
+                      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor">
+                        <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z" />
+                      </svg>
+                      Instagram Business linked
+                    </p>
+                  )}
+                  {showDetails && (
+                    <div className="mt-3 space-y-1 rounded-lg border border-white/5 bg-black/30 p-3 text-[11px] font-mono">
+                      <div className="text-slate-500">
+                        Page ID: <span className="text-slate-300">{health.page.id}</span>
+                      </div>
+                      {health.instagram?.igUserId && (
+                        <div className="text-slate-500">
+                          IG Business ID: <span className="text-slate-300">{health.instagram.igUserId}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-col items-end gap-2 flex-shrink-0">
+                <Button
+                  variant="ghost"
+                  onClick={startConnect}
+                  disabled={connecting}
+                  className="gap-1.5 text-xs"
+                >
+                  {connecting ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
+                  Reconnect
+                </Button>
+                <button
+                  onClick={() => setShowDetails((v) => !v)}
+                  className="text-[11px] text-slate-500 hover:text-slate-300"
+                >
+                  {showDetails ? "Hide details" : "Show details"}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3">
+              <p className="text-xs text-slate-500">
+                Disconnecting will stop the bot from replying. You can reconnect any time.
+              </p>
+              <button
+                onClick={disconnect}
+                className="text-xs font-medium text-red-400 hover:text-red-300"
+              >
+                Disconnect
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-5">
+            {/* Empty / not-connected state */}
+            <div className="rounded-2xl border border-dashed border-white/10 bg-gradient-to-br from-blue-500/5 via-transparent to-pink-500/5 p-8 text-center">
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 to-blue-600 shadow-lg">
+                <svg viewBox="0 0 24 24" className="w-8 h-8 text-white" fill="currentColor">
+                  <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
+                </svg>
+              </div>
+              <h3 className="mt-4 text-lg font-semibold text-white">
+                Connect your Facebook Page
+              </h3>
+              <p className="mx-auto mt-2 max-w-md text-sm text-slate-400">
+                One click. We'll log in with Facebook, find your Page, and link your Instagram Business account automatically — no copying tokens or IDs.
+              </p>
+              <button
+                onClick={startConnect}
+                disabled={connecting}
+                className="mt-6 inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-500 to-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/30 transition hover:shadow-blue-500/50 disabled:opacity-60"
+              >
+                {connecting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor">
+                    <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
+                  </svg>
+                )}
+                {connecting ? "Opening Facebook…" : "Continue with Facebook"}
+              </button>
+              <p className="mt-4 text-[11px] text-slate-500">
+                We'll request only the permissions needed to reply to messages and publish posts on your behalf.
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+              <p className="text-xs font-medium text-slate-300 mb-2">What we'll get access to</p>
+              <ul className="space-y-1.5 text-[11px] text-slate-500">
+                <li className="flex items-start gap-2">
+                  <CheckCircle2 className="h-3 w-3 text-emerald-400 mt-0.5 flex-shrink-0" />
+                  Read and reply to messages on your Facebook Page
+                </li>
+                <li className="flex items-start gap-2">
+                  <CheckCircle2 className="h-3 w-3 text-emerald-400 mt-0.5 flex-shrink-0" />
+                  Publish posts and read engagement on your Page
+                </li>
+                <li className="flex items-start gap-2">
+                  <CheckCircle2 className="h-3 w-3 text-emerald-400 mt-0.5 flex-shrink-0" />
+                  Access your Instagram Business account if linked to your Page
+                </li>
+                <li className="flex items-start gap-2 text-slate-600">
+                  <span className="h-3 w-3 mt-0.5 flex-shrink-0">×</span>
+                  We never see your password — Meta handles the login
+                </li>
+              </ul>
+            </div>
+          </div>
+        )}
+      </Section>
     </div>
   );
 }

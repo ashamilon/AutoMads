@@ -3,6 +3,7 @@ import { z } from "zod";
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { parseJsonObjectFromLlmContent } from "../llm/ollamaService.js";
+import { ollamaChat } from "../llm/ollamaChat.js";
 import { prisma } from "../db/prisma.js";
 import { parseTenantSettings } from "../types/tenant-settings.js";
 import {
@@ -277,19 +278,16 @@ export async function askRouter(args: {
   }
   const systemPrompt = buildAgentSystemPrompt(identity, audienceHint);
   try {
-    const res = await axios.post(
-      `${config.ollamaBaseUrl.replace(/\/$/, "")}/api/chat`,
+    const res = await ollamaChat(
       {
-        model: config.ollamaModel,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userBlock },
         ],
-        stream: false,
         format: "json",
         options: { temperature: 0.1, num_predict: 320 },
       },
-      { timeout: Math.min(config.ollamaTimeoutMs, 60_000) },
+      { timeoutMs: Math.min(config.ollamaTimeoutMs, 60_000) },
     );
     const content = res.data?.message?.content;
     raw = typeof content === "string" ? content : JSON.stringify(content ?? null);

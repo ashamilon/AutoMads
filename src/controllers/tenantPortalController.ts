@@ -1140,6 +1140,53 @@ export async function runContentAgentNow(req: Request, res: Response): Promise<v
   }
 }
 
+// ─── Photo Caption Agent (Cloudinary folder → hype captions) ────────────────
+
+import {
+  runPhotoCaptionAgent,
+  parsePhotoCaptionAgentSettings,
+} from "../services/photoCaptionAgentService.js";
+
+/** GET current photoCaptionAgent settings from tenant.settings JSON. */
+export async function getPhotoCaptionAgentSettings(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const settings = (t.settings ?? {}) as Record<string, unknown>;
+  const photoCaptionAgent = parsePhotoCaptionAgentSettings(settings.photoCaptionAgent);
+  res.json({ photoCaptionAgent });
+}
+
+/** PATCH photoCaptionAgent config in tenant.settings JSON. */
+export async function updatePhotoCaptionAgentSettings(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const body = req.body ?? {};
+  const tenant = await prisma.tenant.findUnique({ where: { id: t.id } });
+  if (!tenant) {
+    res.status(404).json({ error: "tenant_not_found" });
+    return;
+  }
+  const settings = (tenant.settings ?? {}) as Record<string, unknown>;
+  const next: Record<string, unknown> = { ...settings };
+  if (body.photoCaptionAgent && typeof body.photoCaptionAgent === "object") {
+    next.photoCaptionAgent = {
+      ...((settings.photoCaptionAgent ?? {}) as Record<string, unknown>),
+      ...body.photoCaptionAgent,
+    };
+  }
+  await prisma.tenant.update({ where: { id: t.id }, data: { settings: next as object } });
+  res.json({ photoCaptionAgent: parsePhotoCaptionAgentSettings(next.photoCaptionAgent) });
+}
+
+/** Manual trigger ("Run now" / "Generate one post now" button). */
+export async function runPhotoCaptionAgentNow(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  try {
+    const result = await runPhotoCaptionAgent(t.id);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: "agent_failed", detail: String(e) });
+  }
+}
+
 // ─── Social Account Validation ───────────────────────────────────────────────
 
 /**
@@ -1429,19 +1476,91 @@ export async function validateFacebookPage(req: Request, res: Response): Promise
 export async function validateInstagram(req: Request, res: Response): Promise<void> {
   const t = req.tenant!;
   const { igUserId } = req.body;
-  if (!igUserId) { res.status(400).json({ ok: false, error: "igUserId required" }); return; }  const pageAccessToken = t.facebookPageAccessToken;
+  if (!igUserId) {
+    res.status(400).json({ ok: false, error: "igUserId required" });
+    return;
+  }
+  const pageAccessToken = t.facebookPageAccessToken;
   if (!pageAccessToken) {
-    res.json({ ok: false, error: "No Facebook Page Access Token configured. Set it up in the Pages tab first." });
+    res.json({
+      ok: false,
+      error: "No Facebook Page Access Token configured. Set it up in the Pages tab first.",
+    });
     return;
   }
 
   try {
-    const resp = await axios.get(
-      `https://graph.facebook.com/v21.0/${igUserId}`,
-      { params: { fields: "id,username,name,profile_picture_url", access_token: pageAccessToken } },
-    );
+    const resp = await axios.get(`https://graph.facebook.com/v21.0/${igUserId}`, {
+      params: { fields: "id,username,name,profile_picture_url", access_token: pageAccessToken },
+    });
     const data = resp.data;
-    res.json({ ok: true, username: data.username, name: data.name, profilePicture: data.profile_picture_url });
+    res.json({
+      ok: true,
+      igUserId: data.id,
+      username: data.username,
+      name: data.name,
+      profilePicture: data.profile_picture_url,
+    });
+  } catch (e: any) {
+    const msg = e?.response?.data?.error?.message ?? String(e);
+    res.json({ ok: false, error: msg });
+  }
+}
+
+/**
+ * Auto-discover the Instagram Business Account id linked to the tenant's
+ * connected Facebook Page. The IG↔Page link itself must be made on Meta's
+ * side first (FB Page → Linked accounts → Instagram); we just read it back
+ * and surface the right `igUserId` so the operator never has to dig through
+ * Graph Explorer for it.
+ */
+export async function discoverInstagram(req: Request, res: Response): Promise<void> {
+  const t = req.tenant!;
+  const pageId = t.facebookPageId;
+  const pageAccessToken = t.facebookPageAccessToken;
+  if (!pageId) {
+    res.json({
+      ok: false,
+      error: "No Facebook Page connected. Connect a Page in the Pages tab first.",
+    });
+    return;
+  }
+  if (!pageAccessToken) {
+    res.json({
+      ok: false,
+      error: "No Page Access Token saved. Reconnect the Facebook Page in the Pages tab.",
+    });
+    return;
+  }
+  try {
+    const resp = await axios.get(`https://graph.facebook.com/v21.0/${pageId}`, {
+      params: {
+        fields:
+          "instagram_business_account{id,username,name,profile_picture_url},connected_instagram_account{id,username,name,profile_picture_url}",
+        access_token: pageAccessToken,
+      },
+    });
+    // Newer responses use `instagram_business_account`; some older Pages still
+    // surface it as `connected_instagram_account`. We accept either.
+    const ig =
+      resp.data?.instagram_business_account ?? resp.data?.connected_instagram_account ?? null;
+    if (!ig?.id) {
+      res.json({
+        ok: false,
+        error:
+          "No Instagram Business/Creator account is linked to this Facebook Page yet. " +
+          "Open Facebook → your Page → Settings → Linked accounts → Instagram → Connect, " +
+          "then click Discover again.",
+      });
+      return;
+    }
+    res.json({
+      ok: true,
+      igUserId: ig.id,
+      username: ig.username,
+      name: ig.name,
+      profilePicture: ig.profile_picture_url,
+    });
   } catch (e: any) {
     const msg = e?.response?.data?.error?.message ?? String(e);
     res.json({ ok: false, error: msg });

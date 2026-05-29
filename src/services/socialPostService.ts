@@ -2,6 +2,7 @@ import axios from "axios";
 import { prisma } from "../db/prisma.js";
 import { logger } from "../utils/logger.js";
 import { config } from "../config/index.js";
+import { ollamaChat } from "../llm/ollamaChat.js";
 
 const GRAPH_API_BASE = "https://graph.facebook.com/v21.0";
 
@@ -318,18 +319,15 @@ export async function generateCaption(opts: {
     .join("\n");
 
   try {
-    const res = await axios.post(
-      `${config.ollamaBaseUrl.replace(/\/$/, "")}/api/chat`,
+    const res = await ollamaChat(
       {
-        model: config.ollamaModel,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
         ],
-        stream: false,
         options: { temperature: 0.85, num_predict: 220 },
       },
-      { timeout: 30_000 },
+      { timeoutMs: 30_000 },
     );
 
     const text = String(res.data?.message?.content ?? "")

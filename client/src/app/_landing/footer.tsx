@@ -108,8 +108,8 @@ export function LandingFooter() {
             © {new Date().getFullYear()} AI Commerce OS · Built for Bangladeshi commerce.
           </p>
           <div className="flex items-center gap-5 text-[11.5px] text-slate-500">
-            <a href="#" className="transition hover:text-slate-300">Terms</a>
-            <a href="#" className="transition hover:text-slate-300">Privacy</a>
+            <Link href="/terms" className="transition hover:text-slate-300">Terms</Link>
+            <Link href="/privacy" className="transition hover:text-slate-300">Privacy</Link>
             <a href="#" className="transition hover:text-slate-300">Status</a>
           </div>
         </div>

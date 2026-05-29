@@ -4,6 +4,7 @@ import { z } from "zod";
 import { config } from "../config/index.js";
 import type { BotPersona } from "../llm/ollamaService.js";
 import { parseJsonObjectFromLlmContent } from "../llm/ollamaService.js";
+import { ollamaChat } from "../llm/ollamaChat.js";
 import { logger } from "../utils/logger.js";
 
 const synthesisSchema = z.object({
@@ -92,19 +93,16 @@ ${raw}
 
 Return the JSON object as specified.`;
 
-  const res = await axios.post(
-    `${config.ollamaBaseUrl.replace(/\/$/, "")}/api/chat`,
+  const res = await ollamaChat(
     {
-      model: config.ollamaModel,
       messages: [
         { role: "system", content: SYNTH_SYSTEM },
         { role: "user", content: userBlock },
       ],
-      stream: false,
       format: "json",
       options: { temperature: 0.25, num_predict: 4_000 },
     },
-    { timeout: Math.min(config.ollamaTimeoutMs, 300_000) },
+    { timeoutMs: Math.min(config.ollamaTimeoutMs, 300_000) },
   );
   const content = res.data?.message?.content;
   const parsed = parseJsonObjectFromLlmContent(content);

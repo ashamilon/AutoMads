@@ -3,6 +3,12 @@ import { config } from "./config/index.js";
 import { logger } from "./utils/logger.js";
 import { startPostScheduler } from "./services/postSchedulerService.js";
 import { bootstrapSuperAdminFromEnv } from "./services/admin/superAdminAuth.js";
+import { installOpenRouterAdapter } from "./llm/openRouterAdapter.js";
+
+// Install the OpenRouter axios adapter BEFORE creating the app so any
+// request fired during route registration is already rerouted. No-op when
+// OPENROUTER_API_KEY is unset.
+installOpenRouterAdapter();
 
 const app = createApp();
 

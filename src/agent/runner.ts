@@ -2,6 +2,7 @@ import axios from "axios";
 import { prisma } from "../db/prisma.js";
 import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
+import { ollamaChat } from "../llm/ollamaChat.js";
 import { sendMessengerText } from "../integrations/facebook/messengerService.js";
 import { runAgentTurn } from "./loop.js";
 import { ensureCustomerProfile } from "./customerProfile.js";
@@ -198,18 +199,15 @@ async function generateCandidFallback(
     ]
       .filter(Boolean)
       .join("\n");
-    const res = await axios.post(
-      url,
+    const res = await ollamaChat(
       {
-        model: config.ollamaModel,
         messages: [
           { role: "system", content: sys },
           { role: "user", content: user },
         ],
-        stream: false,
         options: { temperature: 0.4, num_predict: 140 },
       },
-      { timeout: Math.min(config.ollamaTimeoutMs, 25_000) },
+      { timeoutMs: Math.min(config.ollamaTimeoutMs, 25_000) },
     );
     const content: unknown = res.data?.message?.content;
     if (typeof content !== "string") return null;

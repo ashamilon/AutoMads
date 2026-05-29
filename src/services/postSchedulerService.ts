@@ -3,6 +3,7 @@ import { logger } from "../utils/logger.js";
 import { publishScheduledPost } from "./socialPostService.js";
 import { processDueFollowUps } from "../agent/followUp.js";
 import { runContentAgentForAllTenants } from "./contentAgentService.js";
+import { runPhotoCaptionAgentForAllTenants } from "./photoCaptionAgentService.js";
 
 const POLL_INTERVAL_MS = 60_000;
 const CONTENT_AGENT_INTERVAL_MS = 60 * 60 * 1000; // hourly
@@ -47,6 +48,13 @@ async function tick(): Promise<void> {
       lastContentAgentRun = Date.now();
       await runContentAgentForAllTenants().catch((e: unknown) =>
         logger.warn({ e: String(e) }, "Scheduler: content agent drain failed"),
+      );
+      // Photo-caption agent runs on the same hourly tick. It enforces its
+      // own per-tenant daily quota too, so calling it alongside the catalog
+      // agent is safe — the two never produce duplicate posts because they
+      // tag rows with distinct `postType`s (`agent_*` vs `agent_photo_caption`).
+      await runPhotoCaptionAgentForAllTenants().catch((e: unknown) =>
+        logger.warn({ e: String(e) }, "Scheduler: photo caption agent drain failed"),
       );
     }
   } catch (e) {

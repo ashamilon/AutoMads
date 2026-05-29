@@ -38,6 +38,43 @@ export const config = {
     isSandbox: (process.env.SSLCOMMERZ_IS_SANDBOX ?? "true") === "true",
   },
   facebookAppSecret: process.env.FACEBOOK_APP_SECRET ?? "",
+  /** Meta App ID — paired with `facebookAppSecret` to drive the self-serve
+   *  "Connect with Facebook" OAuth flow. Find under Meta App Dashboard →
+   *  App settings → Basic. The same id appears at the top of the Rate Limits
+   *  page. Required for the OAuth callback to exchange short-lived user
+   *  tokens for long-lived ones. */
+  facebookAppId: process.env.FACEBOOK_APP_ID ?? "",
+  /**
+   * OpenRouter integration — when `OPENROUTER_API_KEY` is set, every Ollama
+   * `/api/chat` call our services issue is transparently rerouted to the
+   * matching OpenRouter chat-completion endpoint and the response is
+   * rewritten back to Ollama shape. This lets us swap the inference
+   * provider without touching dozens of caller sites.
+   *
+   * `apiKeys` is the parsed key list — comma-separated keys in the env are
+   * split + trimmed. The adapter rotates through them on 429 / auth
+   * failures so a tenant with two free-tier OpenRouter accounts effectively
+   * doubles their daily budget.
+   *
+   * `openRouterModel` is the model id we send (e.g. `google/gemma-4-31b-it:free`).
+   * Falls back to a Gemma-4 variant when unset so the default is sensible.
+   */
+  openRouter: {
+    /** Newline / comma separated key list. First-key-wins; rotate on 429. */
+    apiKeys: (process.env.OPENROUTER_API_KEY ?? "")
+      .split(/[,\n]+/g)
+      .map((s) => s.trim())
+      .filter(Boolean),
+    baseUrl: process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
+    model: process.env.OPENROUTER_MODEL ?? "google/gemma-4-31b-it:free",
+    /** Optional referer the OpenRouter dashboard uses for analytics. */
+    referer: process.env.OPENROUTER_REFERER ?? "https://dashboard.pipwarp.com",
+    /** Optional X-Title used in the OpenRouter dashboard. */
+    siteTitle: process.env.OPENROUTER_SITE_TITLE ?? "AutoMads",
+    /** When true and ALL OpenRouter keys are exhausted, fall through to
+     *  the local Ollama endpoint defined by `ollamaBaseUrl`. */
+    fallbackToOllama: (process.env.OPENROUTER_FALLBACK_TO_OLLAMA ?? "true").toLowerCase() !== "false",
+  },
   /**
    * When true, negative customer cues (ভুল/wrong/etc.) paired with your last bot turn
    * are embedded into KnowledgeExample (`metadata.kind="correction"`) and surfaced on future chats.

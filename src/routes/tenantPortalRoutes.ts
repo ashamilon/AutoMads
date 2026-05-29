@@ -36,14 +36,23 @@ import {
   getContentAgentSettings,
   updateContentAgentSettings,
   runContentAgentNow,
+  getPhotoCaptionAgentSettings,
+  updatePhotoCaptionAgentSettings,
+  runPhotoCaptionAgentNow,
   getGraceStatus,
   endGraceEarly,
   listMutedConversations,
   unmuteConversation,
   validateFacebookPage,
   validateInstagram,
+  discoverInstagram,
   validateTiktok,
 } from "../controllers/tenantPortalController.js";
+import {
+  startFacebookOAuth,
+  disconnectFacebook,
+  facebookHealth,
+} from "../controllers/facebookOAuthController.js";
 import { learnPersonaFromUploads } from "../controllers/personaLearnController.js";
 import { getTenantCategorySchema } from "../controllers/tenantSchemaController.js";
 import { getAnalyticsOverview } from "../controllers/tenantAnalyticsController.js";
@@ -166,6 +175,11 @@ tenantPortalRoutes.get("/content-agent", getContentAgentSettings);
 tenantPortalRoutes.patch("/content-agent", updateContentAgentSettings);
 tenantPortalRoutes.post("/content-agent/run-now", runContentAgentNow);
 
+// Photo caption agent (Cloudinary folder → hype captions, no catalog needed)
+tenantPortalRoutes.get("/photo-caption-agent", getPhotoCaptionAgentSettings);
+tenantPortalRoutes.patch("/photo-caption-agent", updatePhotoCaptionAgentSettings);
+tenantPortalRoutes.post("/photo-caption-agent/run-now", runPhotoCaptionAgentNow);
+
 // Grace-window + per-conversation agent mute control
 tenantPortalRoutes.get("/grace-status", getGraceStatus);
 tenantPortalRoutes.post("/grace-status/end", endGraceEarly);
@@ -174,7 +188,11 @@ tenantPortalRoutes.post("/conversations/:conversationId/unmute", unmuteConversat
 
 // Social account validation
 tenantPortalRoutes.get("/social/facebook-status", validateFacebookPage);
+tenantPortalRoutes.get("/social/facebook/connect", startFacebookOAuth);
+tenantPortalRoutes.get("/social/facebook/health", facebookHealth);
+tenantPortalRoutes.post("/social/facebook/disconnect", disconnectFacebook);
 tenantPortalRoutes.post("/social/validate-instagram", validateInstagram);
+tenantPortalRoutes.post("/social/discover-instagram", discoverInstagram);
 tenantPortalRoutes.post("/social/validate-tiktok", validateTiktok);
 
 tenantPortalRoutes.get("/training-json", getTrainingJsonCorpus);

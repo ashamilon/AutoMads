@@ -342,9 +342,10 @@ export async function runContentAgent(tenantId: string): Promise<ContentAgentRun
       });
     } catch (e) {
       logger.warn({ e: String(e), tenantId, sku: product.clientSku }, "contentAgent: caption gen failed; falling back");
-      // Fallback never includes price — captions must stay price-free on the
-      // public feed.
-      caption = `🔥 ${productLabel} — DM kore order korun 📩`;
+      // Fallback never includes price or aggressive CTAs — captions must
+      // stay price-free, and we never want the same fallback string showing
+      // up across multiple posts (looks like spam to Meta + customers).
+      caption = `🔥 ${productLabel}`;
     }
 
     const scheduledAt = slots[i] ?? new Date(Date.now() + 30 * 60 * 1000);

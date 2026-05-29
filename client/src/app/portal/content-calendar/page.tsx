@@ -112,6 +112,7 @@ export default function ContentCalendarPage() {
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [showAgent, setShowAgent] = useState(false);
+  const [showPhotoAgent, setShowPhotoAgent] = useState(false);
   const [filter, setFilter] = useState<"all" | "scheduled" | "published" | "draft" | "pending_approval" | "failed">("all");
 
   const load = useCallback(async () => {
@@ -199,9 +200,12 @@ export default function ContentCalendarPage() {
         title="Content Calendar"
         description="Schedule, create, and manage social media posts across all platforms"
         actions={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button variant="secondary" onClick={() => setShowAgent(true)}>
               <Wand2 size={16} className="mr-1.5" /> AI Agent
+            </Button>
+            <Button variant="secondary" onClick={() => setShowPhotoAgent(true)}>
+              <ImageIcon size={16} className="mr-1.5" /> Photo Posts
             </Button>
             <Button onClick={() => setShowCreate(true)}>
               <Plus size={16} className="mr-1.5" /> Create Post
@@ -378,6 +382,13 @@ export default function ContentCalendarPage() {
       {showAgent && (
         <AgentPanel
           onClose={() => setShowAgent(false)}
+          onAgentRan={() => load()}
+        />
+      )}
+
+      {showPhotoAgent && (
+        <PhotoAgentPanel
+          onClose={() => setShowPhotoAgent(false)}
           onAgentRan={() => load()}
         />
       )}
@@ -1319,6 +1330,353 @@ function FacebookStatusCard() {
         <RefreshCw size={13} className={cn(refreshing && "animate-spin")} />
         {refreshing ? "Checking…" : "Recheck"}
       </button>
+    </div>
+  );
+}
+
+// ─── PhotoAgentPanel — Cloudinary-folder hype-caption autopilot ──────────
+//
+// Sister panel to AgentPanel. Different agentic mode: instead of walking the
+// catalog, it walks a Cloudinary folder full of lifestyle / brand photos
+// and writes short hype captions ("Bomb 🔥", "Poysa ushul") drawing from
+// hint phrases the tenant types in. Posts auto-publish on the configured
+// schedule — no approval gate.
+
+type PhotoCaptionAgentSettings = {
+  enabled: boolean;
+  cloudinaryFolder: string;
+  captionHints: string[];
+  postsPerDay: number;
+  postingHourStart: number;
+  postingHourEnd: number;
+  defaultPlatform: string;
+  language: "banglish" | "bangla" | "english" | "mixed";
+};
+
+const DEFAULT_PHOTO_AGENT: PhotoCaptionAgentSettings = {
+  enabled: false,
+  cloudinaryFolder: "",
+  captionHints: [],
+  postsPerDay: 1,
+  postingHourStart: 11,
+  postingHourEnd: 19,
+  defaultPlatform: "facebook",
+  language: "mixed",
+};
+
+function PhotoAgentPanel({
+  onClose,
+  onAgentRan,
+}: {
+  onClose: () => void;
+  onAgentRan: () => void;
+}) {
+  const [agent, setAgent] = useState<PhotoCaptionAgentSettings>(DEFAULT_PHOTO_AGENT);
+  // Free-text textarea — converted to an array on save. Easier UX than a
+  // tag-pill input for the kind of phrase a tenant types ("poysa ushul").
+  const [hintsText, setHintsText] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [feedback, setFeedback] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch<{ photoCaptionAgent: PhotoCaptionAgentSettings }>(
+          "/api/v1/photo-caption-agent",
+        );
+        if (!cancelled) {
+          setAgent(res.photoCaptionAgent);
+          setHintsText((res.photoCaptionAgent.captionHints ?? []).join("\n"));
+        }
+      } catch {
+        // Defaults are fine — surface the empty form.
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Convert "one phrase per line OR comma-separated" → string[]. Trim, drop
+  // empties, dedupe (case-sensitive — "BOMB" and "bomb" can coexist if the
+  // tenant really wants).
+  const hintsFromText = (raw: string): string[] => {
+    const split = raw.split(/[\n,]+/g);
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const s of split) {
+      const t = s.trim();
+      if (!t) continue;
+      if (seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+    }
+    return out.slice(0, 30);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setFeedback(null);
+    try {
+      const next: PhotoCaptionAgentSettings = {
+        ...agent,
+        captionHints: hintsFromText(hintsText),
+      };
+      await apiFetch("/api/v1/photo-caption-agent", {
+        method: "PATCH",
+        body: JSON.stringify({ photoCaptionAgent: next }),
+      });
+      setAgent(next);
+      setFeedback({ kind: "ok", text: "Saved." });
+    } catch (e: any) {
+      setFeedback({ kind: "error", text: e?.message ?? "Save failed" });
+    }
+    setSaving(false);
+  };
+
+  const runNow = async () => {
+    setRunning(true);
+    setFeedback(null);
+    try {
+      const res = await apiFetch<{
+        ok: boolean;
+        skipped: string | null;
+        drafted: Array<{ postId: string; publicId: string; caption: string }>;
+        reasoning: string[];
+      }>("/api/v1/photo-caption-agent/run-now", { method: "POST" });
+      if (res.skipped) {
+        setFeedback({ kind: "error", text: `Skipped: ${res.skipped}` });
+      } else if (res.drafted.length === 0) {
+        setFeedback({ kind: "error", text: "No drafts created (check the logs / Cloudinary folder)." });
+      } else {
+        setFeedback({
+          kind: "ok",
+          text: `Created ${res.drafted.length} post${res.drafted.length === 1 ? "" : "s"} — see calendar.`,
+        });
+        onAgentRan();
+      }
+    } catch (e: any) {
+      setFeedback({ kind: "error", text: e?.message ?? "Run failed" });
+    }
+    setRunning(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+      <div className="relative w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl border border-white/10 bg-slate-950 shadow-2xl">
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-white/[0.06] bg-slate-950/95 px-6 py-4 backdrop-blur">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-pink-500 to-fuchsia-600 shadow-lg shadow-pink-500/30">
+              <ImageIcon className="h-5 w-5 text-white" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold text-white">Photo Posts Agent</h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Auto-publish hype-caption posts from a Cloudinary folder
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-2 text-slate-400 transition hover:bg-white/5 hover:text-white"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-5">
+          {loading ? (
+            <div className="flex items-center justify-center py-12 text-sm text-slate-400">
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
+            </div>
+          ) : (
+            <>
+              {/* Master switch */}
+              <div className="flex items-start justify-between gap-4 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-white">Photo posts autopilot</p>
+                  <p className="mt-1 text-xs text-slate-400 leading-relaxed">
+                    When enabled, the agent will auto-publish posts from your
+                    Cloudinary folder using a random photo + a hype-style
+                    caption. Photos rotate without repeating until the folder
+                    is exhausted.
+                  </p>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                  <input
+                    type="checkbox"
+                    checked={agent.enabled}
+                    onChange={(e) => setAgent({ ...agent, enabled: e.target.checked })}
+                    className="sr-only peer"
+                  />
+                  <div className="w-10 h-5 rounded-full bg-slate-700 peer-checked:bg-emerald-500 transition-colors after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-5" />
+                </label>
+              </div>
+
+              {/* Cloudinary folder path */}
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-slate-300">
+                  Cloudinary folder path
+                </label>
+                <input
+                  value={agent.cloudinaryFolder}
+                  onChange={(e) => setAgent({ ...agent, cloudinaryFolder: e.target.value })}
+                  placeholder="e.g. lifestyle/wc26/"
+                  className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-pink-500/40 focus:outline-none"
+                />
+                <p className="mt-1.5 text-[11px] text-slate-500">
+                  Use the folder prefix as it appears in your Cloudinary
+                  Media Library. Leave blank to fall back to the platform
+                  default.
+                </p>
+              </div>
+
+              {/* Caption hints */}
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-slate-300">
+                  Caption hint phrases
+                </label>
+                <textarea
+                  value={hintsText}
+                  onChange={(e) => setHintsText(e.target.value)}
+                  rows={5}
+                  placeholder={"bomb\npoysa ushul\nfresh stock\nlimited drop\nekdom mass\ntrending now"}
+                  className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-pink-500/40 focus:outline-none font-mono"
+                />
+                <p className="mt-1.5 text-[11px] text-slate-500 leading-relaxed">
+                  One phrase per line (or separate with commas). The agent
+                  picks 1-5 of these per post and weaves them into a short
+                  caption. Mix Banglish, Bangla, English — whatever sounds
+                  natural for your shop.
+                </p>
+                {hintsFromText(hintsText).length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {hintsFromText(hintsText).map((h, i) => (
+                      <span
+                        key={i}
+                        className="inline-flex items-center rounded-full bg-pink-500/10 border border-pink-500/30 px-2 py-0.5 text-[10px] font-medium text-pink-300"
+                      >
+                        {h}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Cadence + window */}
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-slate-300">
+                    Posts per day
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={20}
+                    value={agent.postsPerDay}
+                    onChange={(e) =>
+                      setAgent({ ...agent, postsPerDay: Number(e.target.value) || 0 })
+                    }
+                    className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-slate-100 focus:border-pink-500/40 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-slate-300">
+                    From hour
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={23}
+                    value={agent.postingHourStart}
+                    onChange={(e) =>
+                      setAgent({ ...agent, postingHourStart: Number(e.target.value) || 0 })
+                    }
+                    className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-slate-100 focus:border-pink-500/40 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-slate-300">
+                    To hour
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={23}
+                    value={agent.postingHourEnd}
+                    onChange={(e) =>
+                      setAgent({ ...agent, postingHourEnd: Number(e.target.value) || 0 })
+                    }
+                    className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-slate-100 focus:border-pink-500/40 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Language */}
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-slate-300">
+                  Caption language
+                </label>
+                <select
+                  value={agent.language}
+                  onChange={(e) =>
+                    setAgent({
+                      ...agent,
+                      language: e.target.value as PhotoCaptionAgentSettings["language"],
+                    })
+                  }
+                  className="w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-slate-100 focus:border-pink-500/40 focus:outline-none"
+                >
+                  <option value="mixed">Mixed (Banglish + English) — recommended</option>
+                  <option value="banglish">Banglish only</option>
+                  <option value="bangla">Bangla (in Bangla script)</option>
+                  <option value="english">English only</option>
+                </select>
+              </div>
+
+              {feedback && (
+                <div
+                  className={cn(
+                    "rounded-lg border px-3 py-2 text-xs",
+                    feedback.kind === "ok"
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                      : "border-red-500/30 bg-red-500/10 text-red-200",
+                  )}
+                >
+                  {feedback.text}
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3 pt-2 border-t border-white/[0.06]">
+                <Button variant="ghost" onClick={onClose} className="text-xs">
+                  Close
+                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="secondary"
+                    onClick={runNow}
+                    disabled={running || saving || !agent.enabled || !agent.cloudinaryFolder}
+                    className="gap-1.5"
+                  >
+                    {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+                    Run now (test)
+                  </Button>
+                  <Button onClick={save} disabled={saving || running} className="gap-1.5">
+                    {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                    Save
+                  </Button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
